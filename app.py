@@ -202,7 +202,15 @@ with st.form("kpi_input_form", clear_on_submit=False):
     with c2:
         thuc_hien = st.number_input("4) Thực hiện", min_value=0.0, step=0.1, format="%.4f")
         trong_so = st.number_input("5) Trọng số", min_value=0.0, step=0.1, format="%.4f")
-        bo_phan = st.text_input("6) Bộ phận/người phụ trách")
+    bo_phan_list = [
+        "Tổ Kế hoạch kỹ thuật",
+        "Tổ Kinh doanh tổng hợp",
+        "Tổ Quản lý tổng hợp 1",
+        "Tổ Quản lý tổng hợp 2",
+        "Tổ Trực vận hành",
+        "Tổ Kiểm tra giám sát mua bán điện",
+    ]
+    bo_phan = st.selectbox("6) Bộ phận/người phụ trách", bo_phan_list)
     with c3:
         thang = st.selectbox("7) Tháng", list(range(1,13)), index=datetime.now().month-1)
         nam = st.number_input("8) Năm", min_value=2000, max_value=2100, value=datetime.now().year, step=1)
