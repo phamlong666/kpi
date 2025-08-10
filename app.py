@@ -13,26 +13,43 @@ import gspread
 from google.oauth2.service_account import Credentials
 from gspread_dataframe import set_with_dataframe, get_as_dataframe
 
-st.set_page_config(page_title="KPI Scorer – Định Hóa (Full Suite)", layout="wide", page_icon="🔐")
+st.set_page_config(
+    page_title="KPI Đội quản lý Điện lực khu vực Định Hóa",
+    layout="wide",
+    page_icon="🔐",
+)
 
-# ----- CSS + Logo -----
+# ===== CSS + Header (tự nhận logo nếu có assets/logo.png) =====
 from pathlib import Path as _Path
 _logo_path = _Path(__file__).parent / "assets" / "logo.png"
 st.markdown('''
 <style>
-.brand-wrap{display:flex;align-items:center;gap:18px;padding:14px 18px;margin:8px 0 8px;
+.brand-wrap{display:flex;align-items:center;gap:16px;padding:14px 18px;margin:6px 0 16px;
   border-radius:16px;border:1px solid rgba(245,158,11,.25);
   background: radial-gradient(900px circle at 0% -20%, rgba(245,158,11,.10), transparent 40%);}
-.brand-wrap h1{font-size:28px;line-height:1.2;margin:0;}
-.brand-wrap p{margin:2px 0 0;color:#6b7280}
+.brand-title{margin:0;font-size:28px;line-height:1.2}
+.brand-sub{margin:2px 0 0;color:#6b7280}
 .stButton>button{background:#f59e0b;color:white;border:0;border-radius:12px;padding:8px 14px}
 .stButton>button:hover{filter:brightness(.95)}
+.block{padding:12px 14px;border:1px solid #eee;border-radius:12px;margin-bottom:12px}
+footer{visibility:hidden}
 </style>
 ''', unsafe_allow_html=True)
-if _logo_path.exists():
-    cA, cB = st.columns([1,10])
-    with cA: st.image(str(_logo_path), width=64)
-    with cB: st.markdown("<div class='brand-wrap'><div><h1>KPI Đội quản lý Điện lực khu vực Định Hóa</h1><p>Full Suite · Import linh hoạt · Nhập tay · Báo cáo & Email</p></div></div>", unsafe_allow_html=True)
+
+c0, c1 = st.columns([1,10])
+with c0:
+    if _logo_path.exists():
+        st.image(str(_logo_path), width=64)
+with c1:
+    st.markdown(
+        "<div class='brand-wrap'><div><h1 class='brand-title'>KPI Đội quản lý Điện lực khu vực Định Hóa</h1>"
+        "<p class='brand-sub'>Nhập thủ công ➜ Xuất Excel chuẩn (9 cột)</p></div></div>",
+        unsafe_allow_html=True,
+    )
+
+# =========================================================
+# Old App's Configuration and Functions
+# =========================================================
 
 # =====================
 # Worksheet names
@@ -70,17 +87,14 @@ DEFAULT_DEPTS = [
 ]
 
 # =====================
-# Helpers from both files, with name conflicts resolved
+# Old App's Helpers
 # =====================
 def get_client():
-    # Read secrets
     try:
         svc = dict(st.secrets["google_service_account"])
     except Exception:
         st.error("❌ Chưa cấu hình secrets. Tạo .streamlit/secrets.toml và dán Service Account.")
         st.stop()
-
-    # Support private_key_b64 (preferred) or private_key (fallback)
     if "private_key_b64" in svc and svc["private_key_b64"]:
         try:
             decoded = base64.b64decode(svc["private_key_b64"]).decode("utf-8")
@@ -93,12 +107,10 @@ def get_client():
     else:
         st.error("❌ Không tìm thấy private_key_b64 hay private_key trong secrets.")
         st.stop()
-
     scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(svc, scopes=scopes)
     return gspread.authorize(creds)
 
-# This is a combined get_or_create_ws function
 def get_or_create_ws(gc, spreadsheet_id, title, headers=None):
     sh = gc.open_by_key(spreadsheet_id)
     try:
@@ -109,7 +121,6 @@ def get_or_create_ws(gc, spreadsheet_id, title, headers=None):
             ws.update("A1", [headers])
     return ws
 
-# This is a combined load_ws_df function
 def load_ws_df(ws, expected_cols=None):
     df = get_as_dataframe(ws, evaluate_formulas=True, header=0) or pd.DataFrame()
     df = df.dropna(how="all")
@@ -120,11 +131,9 @@ def load_ws_df(ws, expected_cols=None):
         df = df[expected_cols]
     return df
 
-# This is a combined save_ws_df function
 def save_ws_df(ws, df):
     set_with_dataframe(ws, df, include_index=False, include_column_header=True, resize=True)
 
-# This is a combined safe_float function
 def safe_float(x):
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return None
@@ -136,7 +145,6 @@ def safe_float(x):
         return None
 
 def compute_points(row, group):
-    # Group weights (Định Hóa = Nhóm 2)
     if group == 2:
         penalty_per_0_1 = 0.04
         bonus_per_0_1 = 0.30
@@ -148,19 +156,16 @@ def compute_points(row, group):
         bonus_per_0_1 = 0.20
     max_penalty = 3.0
     max_bonus = 2.0
-
     unit = str(row.get("Đơn vị tính") or "").strip()
     nguong = safe_float(row.get("Ngưỡng/Kế hoạch (%)")) or 1.5
     ke_hoach = safe_float(row.get("Kế hoạch"))
     thuc_hien = safe_float(row.get("Thực hiện"))
-
     sai_so_pct = None
     if unit == "%":
         sai_so_pct = thuc_hien
     else:
         if ke_hoach not in (None, 0) and thuc_hien is not None:
             sai_so_pct = abs(thuc_hien - ke_hoach) / abs(ke_hoach) * 100.0
-
     bac = improve_bac = None
     diem_tru = diem_cong = 0.0
     if sai_so_pct is not None:
@@ -170,11 +175,9 @@ def compute_points(row, group):
         improve_bac = int(np.floor(improve / 0.1 + 1e-9))
         diem_tru = min(max_penalty, penalty_per_0_1 * bac)
         diem_cong = min(max_bonus, bonus_per_0_1 * improve_bac)
-
     bonus = safe_float(row.get("Điểm thưởng trực tiếp")) or 0.0
     ket_qua = (diem_cong or 0) - (diem_tru or 0)
     diem_tong = ket_qua + bonus
-
     return pd.Series({
         "Sai số (%)": None if sai_so_pct is None else round(sai_so_pct, 3),
         "Bậc vượt (0.1%)": bac,
@@ -219,7 +222,6 @@ def send_email_smtp(to_email, subject, body, attachments=None):
     except Exception:
         st.error("❌ Thiếu cấu hình SMTP trong secrets. Điền [smtp] host, port, user, password.")
         return False, "Missing SMTP secrets"
-
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = to_email
@@ -238,13 +240,10 @@ def send_email_smtp(to_email, subject, body, attachments=None):
     except Exception as e:
         return False, str(e)
 
-
 # =====================
 # Main Application
 # =====================
-# The main application logic from app.py and app1.py is now combined
 st.title("🧮 KPI Scorer – Định Hóa (Full Suite)")
-
 with st.sidebar:
     st.subheader("🔐 Kết nối")
     spreadsheet_id = st.text_input("Spreadsheet ID", value="", placeholder="1A2B3C...")
@@ -267,7 +266,6 @@ except Exception as e:
     st.error(f"❌ Lỗi kết nối: {e}")
     st.stop()
 
-# Bootstrap departments
 dept_df = load_ws_df(ws_dept, expected_cols=EXPECTED_DEPT_COLS)
 if dept_df.empty:
     dept_df = pd.DataFrame({"Bộ phận": DEFAULT_DEPTS})
@@ -295,18 +293,15 @@ with colE:
 with colF:
     sync_year = st.number_input("Năm", min_value=2000, max_value=2100, value=datetime.now().year, step=1, key="sync_year")
 overwrite = st.checkbox("Ghi đè KPI_DATA của Bộ phận/Tháng/Năm này", value=False)
-
 if up and st.button("🔁 Đồng bộ từ Excel → KPI_DATA"):
     try:
         xls = pd.ExcelFile(up)
         sheet = "Định Hóa" if "Định Hóa" in xls.sheet_names else xls.sheet_names[0]
         raw = pd.read_excel(xls, sheet_name=sheet, header=None)
         flat = flatten_dinh_hoa(raw)
-        
         chi_tieu_col = "Chỉ tiêu" if "Chỉ tiêu" in flat.columns else None
         dvt_col = "Đơn vị tính" if "Đơn vị tính" in flat.columns else ("ĐVT" if "ĐVT" in flat.columns else None)
         phuong_phap_col = "Phương pháp đo kết quả" if "Phương pháp đo kết quả" in flat.columns else None
-        
         imp = pd.DataFrame({
             "Bộ phận": sync_dept,
             "Vai trò": sync_role,
@@ -332,23 +327,19 @@ if up and st.button("🔁 Đồng bộ từ Excel → KPI_DATA"):
             "Mã CV": None
         })
         imp = imp[EXPECTED_KPI_COLS]
-        
         data_df = load_ws_df(ws_kpi, expected_cols=EXPECTED_KPI_COLS)
         if overwrite:
             mask = (data_df["Bộ phận"] != sync_dept) | (data_df["Tháng"] != sync_month) | (data_df["Năm"] != sync_year)
             data_df = data_df[mask]
-        
         final_df = pd.concat([data_df, imp], ignore_index=True)
         final_df = final_df.apply(lambda row: compute_points(row, group) if pd.notna(row['Thực hiện']) else row, axis=1)
-        
         save_ws_df(ws_kpi, final_df)
         st.success("✅ Đồng bộ thành công!")
-
     except Exception as e:
         st.error(f"❌ Lỗi: {e}")
 
 # ====== Manual input (from app.py)
-st.header("1) Nhập KPI thủ công")
+st.header("1) Nhập KPI thủ công từ Google Sheet")
 st.caption("Nhập KPI của một tháng và tính điểm")
 with st.expander("📝 Nhập KPI", expanded=False):
     dept_kpi_options = ["- Chọn Bộ phận -"] + dept_list
@@ -358,10 +349,8 @@ with st.expander("📝 Nhập KPI", expanded=False):
         month_kpi = st.number_input("Tháng", min_value=1, max_value=12, value=datetime.now().month, step=1, key="kpi_month")
     with col2:
         year_kpi = st.number_input("Năm", min_value=2000, max_value=2100, value=datetime.now().year, step=1, key="kpi_year")
-
     if dept_kpi != "- Chọn Bộ phận -":
         kpi_data = all_kpi[(all_kpi["Bộ phận"] == dept_kpi) & (all_kpi["Tháng"] == month_kpi) & (all_kpi["Năm"] == year_kpi)].copy()
-        
         if kpi_data.empty:
             st.info("Chưa có KPI cho bộ phận này.")
         else:
@@ -384,16 +373,12 @@ with st.expander("📝 Nhập KPI", expanded=False):
                 use_container_width=True,
                 num_rows="dynamic"
             )
-            
             if st.button("💾 Cập nhật KPI"):
                 edited_kpi_df["Cập nhật lúc"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 edited_kpi_df = edited_kpi_df.apply(lambda row: compute_points(row, group) if pd.notna(row['Thực hiện']) else row, axis=1)
-                
-                # Update the full all_kpi dataframe
                 kpi_mask = (all_kpi["Bộ phận"] == dept_kpi) & (all_kpi["Tháng"] == month_kpi) & (all_kpi["Năm"] == year_kpi)
                 all_kpi = all_kpi[~kpi_mask]
                 all_kpi = pd.concat([all_kpi, edited_kpi_df], ignore_index=True)
-                
                 save_ws_df(ws_kpi, all_kpi)
                 st.success("✅ Cập nhật KPI thành công!")
                 st.experimental_rerun()
@@ -403,46 +388,35 @@ st.header("2) Báo cáo KPI cá nhân")
 st.caption("Tổng hợp và báo cáo điểm KPI cá nhân")
 rep_month = st.selectbox("Tháng", list(range(1, 13)), index=datetime.now().month - 1)
 rep_year = st.selectbox("Năm", list(range(2020, datetime.now().year + 1)), index=datetime.now().year - 2020)
-
 has_code_kpi = all_kpi["Mã CV"].notna() & (all_kpi["Mã CV"].astype(str).str.strip() != "")
 kpi_with_code = all_kpi[has_code_kpi][["Bộ phận","Chỉ tiêu (tham chiếu)","Tháng","Năm","Mã CV","Điểm tổng"]].copy()
 kpi_without_code = all_kpi[~has_code_kpi][["Bộ phận","Chỉ tiêu (tham chiếu)","Tháng","Năm","Điểm tổng"]].copy()
-
 has_code_asg = asg_df["Mã CV"].notna() & (asg_df["Mã CV"].astype(str).str.strip() != "")
-
 merged = pd.DataFrame(columns=list(asg_df.columns) + ["Điểm tổng"])
 if has_code_asg.any():
     merged = pd.concat([merged, asg_df[has_code_asg].merge(kpi_with_code.dropna(subset=["Mã CV"]), on=["Mã CV", "Tháng", "Năm"], how="left")], ignore_index=True)
 no_code_asg = ~has_code_asg
 if no_code_asg.any():
     merged = pd.concat([merged, asg_df[no_code_asg].merge(kpi_without_code, on=["Bộ phận","Chỉ tiêu (tham chiếu)","Tháng","Năm"], how="left")], ignore_index=True)
-
 mask_rep = (merged["Năm"] == rep_year) & (merged["Tháng"] == rep_month)
 merged = merged[mask_rep].copy()
 merged["Trọng số cá nhân (%)"] = pd.to_numeric(merged["Trọng số cá nhân (%)"], errors="coerce").fillna(0)
 merged["Điểm tổng"] = pd.to_numeric(merged["Điểm tổng"], errors="coerce").fillna(0)
 merged["Điểm thưởng trực tiếp (CN)"] = pd.to_numeric(merged["Điểm thưởng trực tiếp (CN)"], errors="coerce").fillna(0)
-
 merged["Điểm KPI cá nhân"] = merged["Điểm tổng"] * merged["Trọng số cá nhân (%)"] / 100 + merged["Điểm thưởng trực tiếp (CN)"]
 merged["Điểm KPI cá nhân"] = merged["Điểm KPI cá nhân"].apply(lambda x: round(x, 2))
-
 per_person = merged.groupby("Mã NV").agg({
     "Điểm KPI cá nhân": "sum",
     "Trọng số cá nhân (%)": "sum"
 }).reset_index()
-
 per_person = per_person.merge(emp_df[["Mã NV", "Họ và tên", "Bộ phận"]], on="Mã NV", how="left")
 per_person = per_person.sort_values(by="Điểm KPI cá nhân", ascending=False).reset_index(drop=True)
-
 st.subheader(f"Tổng hợp KPI cá nhân tháng {rep_month:02d}/{rep_year}")
 st.dataframe(per_person, use_container_width=True)
-
-# ====== Charts (from app1.py)
 st.subheader("Biểu đồ KPI cá nhân")
 show_labels = st.checkbox("Hiển thị nhãn giá trị", value=True)
 top_n = st.slider("Top N nhân viên", min_value=1, max_value=len(per_person) or 1, value=min(10, len(per_person) or 1))
 top_df = per_person.head(top_n).sort_values(by="Điểm KPI cá nhân", ascending=True)
-
 if not top_df.empty:
     fig1, ax1 = plt.subplots()
     ax1.barh(top_df["Họ và tên"], top_df["Điểm KPI cá nhân"], color="#f59e0b")
@@ -454,7 +428,6 @@ if not top_df.empty:
     st.pyplot(fig1)
 else:
     st.info("Chưa có dữ liệu KPI cá nhân cho kỳ này.")
-
 bottom_n = st.slider("Bottom N nhân viên", min_value=1, max_value=len(per_person) or 1, value=min(10, len(per_person) or 1))
 bot_df = per_person.tail(bottom_n).sort_values(by="Điểm KPI cá nhân", ascending=False)
 if not bot_df.empty:
@@ -470,16 +443,12 @@ if not bot_df.empty:
     st.pyplot(fig2)
 else:
     st.info("Chưa có dữ liệu KPI cá nhân cho kỳ này.")
-
-# ====== Excel and Email (from app1.py)
 excel_buf = io.BytesIO()
 with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
     merged.to_excel(writer, sheet_name="DETAIL_ASSIGN", index=False)
     per_person.to_excel(writer, sheet_name="KPI_PERSON", index=False)
 excel_bytes = excel_buf.getvalue()
-
 st.download_button("⬇️ Tải Excel KPI cá nhân", data=excel_bytes, file_name=f"KPI_canhan_{rep_year}_{rep_month:02d}.xlsx")
-
 to_addr = st.text_input("Gửi tới (email)", value=default_to_email)
 subject = f"Báo cáo KPI cá nhân {rep_month:02d}/{rep_year}"
 body = f"Đính kèm báo cáo KPI cá nhân tháng {rep_month:02d}/{rep_year}. Gồm tổng hợp và chi tiết phân công."
@@ -502,3 +471,133 @@ if st.button("📧 Gửi email kèm Excel"):
         else:
             st.error(f"❌ Lỗi gửi email: {msg}")
 
+# =========================================================
+# New App's Manual Entry and Excel Export Logic
+# =========================================================
+
+# ===== Cấu trúc 9 cột cố định =====
+COLUMNS = [
+    "Tên chỉ tiêu (KPI)",        # 1
+    "Đơn vị tính",              # 2
+    "Kế hoạch",                 # 3
+    "Thực hiện",                # 4
+    "Trọng số",                 # 5
+    "Bộ phận/người phụ trách",  # 6
+    "Tháng",                    # 7
+    "Năm",                      # 8
+    "Điểm KPI",                 # 9 = (Thực hiện / Kế hoạch) × Trọng số
+]
+
+def _to_float(x):
+    if x is None:
+        return None
+    try:
+        return float(str(x).replace(".", "").replace(",", "."))
+    except Exception:
+        return None
+
+if "rows" not in st.session_state:
+    st.session_state.rows = []
+
+st.header("3) Nhập KPI thủ công & Xuất Excel")
+st.subheader("1) Nhập dòng KPI")
+with st.form("add_row_form", clear_on_submit=False):
+    c1, c2, c3 = st.columns([2,1,1])
+    with c1:
+        ten_kpi = st.text_input("Tên chỉ tiêu (KPI)", value="")
+    with c2:
+        dvt = st.selectbox("Đơn vị tính", options=["%", "kWh", "MWh", "GWh", "khác"], index=0)
+    with c3:
+        trong_so = st.number_input("Trọng số", min_value=0.0, max_value=1000.0, step=0.1, value=100.0)
+    c4, c5, c6 = st.columns([1,1,1])
+    with c4:
+        ke_hoach = st.text_input("Kế hoạch", value="")
+    with c5:
+        thuc_hien = st.text_input("Thực hiện", value="")
+    with c6:
+        phu_trach = st.text_input("Bộ phận/người phụ trách", value="")
+    c7, c8, c9 = st.columns([1,1,2])
+    with c7:
+        thang = st.selectbox("Tháng", options=list(range(1, 13)), index=max(0, datetime.now().month - 1))
+    with c8:
+        nam = st.number_input("Năm", min_value=2000, max_value=2100, value=datetime.now().year, step=1)
+    with c9:
+        st.caption("Điểm KPI tự tính: (Thực hiện / Kế hoạch) × Trọng số")
+    if st.form_submit_button("➕ Thêm dòng"):
+        kh = _to_float(ke_hoach)
+        th = _to_float(thuc_hien)
+        ts = _to_float(trong_so) or 0.0
+        diem = None
+        if kh not in (None, 0) and th is not None:
+            diem = (th / kh) * ts
+        st.session_state.rows.append({
+            "Tên chỉ tiêu (KPI)": ten_kpi.strip(),
+            "Đơn vị tính": dvt,
+            "Kế hoạch": kh if kh is not None else ke_hoach,
+            "Thực hiện": th if th is not None else thuc_hien,
+            "Trọng số": ts,
+            "Bộ phận/người phụ trách": phu_trach.strip(),
+            "Tháng": int(thang),
+            "Năm": int(nam),
+            "Điểm KPI": None if diem is None else round(diem, 4),
+        })
+        st.success("Đã thêm 1 dòng.")
+
+st.subheader("2) Dữ liệu đã nhập")
+df = pd.DataFrame(st.session_state.rows, columns=COLUMNS) if st.session_state.rows else pd.DataFrame(columns=COLUMNS)
+if not df.empty:
+    def _recompute(row):
+        kh = _to_float(row["Kế hoạch"])
+        th = _to_float(row["Thực hiện"])
+        ts = _to_float(row["Trọng số"]) or 0.0
+        if kh not in (None, 0) and th is not None:
+            return round((th / kh) * ts, 4)
+        return None
+    df["Điểm KPI"] = df.apply(_recompute, axis=1)
+edited = st.data_editor(df, key="editor", use_container_width=True, num_rows="dynamic")
+cA, cB, cC = st.columns([1,1,2])
+with cA:
+    if st.button("💾 Lưu thay đổi trong bảng"):
+        st.session_state.rows = edited.to_dict(orient="records")
+        st.success("Đã cập nhật dữ liệu.")
+with cB:
+    if st.button("🧹 Xóa tất cả"):
+        st.session_state.rows = []
+        st.success("Đã xóa toàn bộ dữ liệu.")
+with cC:
+    st.caption("Có thể sửa trực tiếp các ô rồi bấm 'Lưu thay đổi'.")
+
+st.subheader("3) Xuất Excel chuẩn (9 cột)")
+if st.session_state.rows:
+    out_df = pd.DataFrame(st.session_state.rows, columns=COLUMNS)
+    def _final(row):
+        try:
+            kh = float(row["Kế hoạch"])
+            th = float(row["Thực hiện"])
+            ts = float(row["Trọng số"])
+            if kh == 0:
+                return None
+            return round((th / kh) * ts, 4)
+        except Exception:
+            return None
+    out_df["Điểm KPI"] = out_df.apply(_final, axis=1)
+    try:
+        file_name = f"KPI_DinhHoa_{int(out_df['Năm'].iloc[-1])}_{int(out_df['Tháng'].iloc[-1]):02d}.xlsx"
+    except Exception:
+        file_name = "KPI_DinhHoa.xlsx"
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        out_df.to_excel(writer, sheet_name="KPI_INPUT", index=False)
+        ws = writer.sheets["KPI_INPUT"]
+        ws.freeze_panes(1, 0)
+        widths = [30, 12, 12, 12, 10, 24, 8, 8, 12]
+        for col_idx, w in enumerate(widths):
+            ws.set_column(col_idx, col_idx, w)
+    st.download_button(
+        "⬇️ Xuất Excel chuẩn",
+        data=buf.getvalue(),
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+else:
+    st.info("Chưa có dữ liệu để xuất. Vui lòng thêm ít nhất 1 dòng.")
