@@ -21,7 +21,8 @@ st.set_page_config(
 
 # ===== CSS + Header (tự nhận logo nếu có assets/logo.png) =====
 from pathlib import Path as _Path
-_logo_path = _Path(__file__).parent / "assets" / "logo.png"
+# Sửa đường dẫn logo để khớp với tên file bạn đã tải lên
+_logo_path = _Path(__file__).parent / "assets" / "logo_hinh_tron.png"
 st.markdown('''
 <style>
 .brand-wrap{display:flex;align-items:center;gap:16px;padding:14px 18px;margin:6px 0 16px;
@@ -38,6 +39,7 @@ footer{visibility:hidden}
 
 c0, c1 = st.columns([1,10])
 with c0:
+    # Kiểm tra lại đường dẫn logo chính xác
     if _logo_path.exists():
         st.image(str(_logo_path), width=64)
 with c1:
