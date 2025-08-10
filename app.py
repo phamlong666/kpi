@@ -46,6 +46,42 @@ def compute_kpi_score(thuc_hien, ke_hoach, trong_so):
         return 0.0
     return round((thuc_hien / ke_hoach) * trong_so, 4)
 
+
+def _kpi_sai_so_du_bao_diem(sai_so_percent, trong_so):
+    """
+    Công thức đặc thù cho các KPI 'Dự báo tổng thương phẩm ...':
+    - Chuẩn: |sai số| ≤ 1.5%  => điểm = trọng số
+    - Nếu vượt chuẩn: cứ 0.1% vượt → trừ 0.04 điểm, tối đa trừ 3 điểm
+    - Không âm điểm
+    Tham số:
+      - sai_so_percent: nhập theo %, ví dụ 1.6 nghĩa là 1.6%
+      - trong_so: điểm tối đa của chỉ tiêu
+    """
+    sai_so = abs(_safe_number(sai_so_percent, 0.0))
+    ts = _safe_number(trong_so, 0.0)
+    if sai_so <= 1.5:
+        return ts
+    vuot = sai_so - 1.5
+    tru = (vuot / 0.1) * 0.04
+    tru = min(tru, 3.0)
+    return max(round(ts - tru, 4), 0.0)
+
+def _is_du_bao_tong_thuong_pham(ten_chi_tieu: str) -> bool:
+    if not ten_chi_tieu:
+        return False
+    s = ten_chi_tieu.strip().lower()
+    return "dự báo tổng thương phẩm" in s
+
+def compute_kpi_score_dynamic(ten_chi_tieu, thuc_hien, ke_hoach, trong_so):
+    """
+    Tự chọn công thức tính điểm theo tên chỉ tiêu:
+    - Nếu tên chứa 'Dự báo tổng thương phẩm' (kể cả nhóm KH >1 triệu kWh/năm) → dùng công thức sai số ±1.5%
+    - Ngược lại → công thức mặc định (Thực hiện/Kế hoạch)*Trọng số
+    Ghi chú: với công thức sai số, trường 'Thực hiện' là giá trị sai số (%) theo tháng.
+    """
+    if _is_du_bao_tong_thuong_pham(ten_chi_tieu):
+        return _kpi_sai_so_du_bao_diem(thuc_hien, trong_so)
+    return compute_kpi_score(thuc_hien, ke_hoach, trong_so)
 def export_dataframe_to_excel(df: pd.DataFrame) -> bytes:
     # Xuất ra file Excel trong bộ nhớ
     buffer = BytesIO()
@@ -123,6 +159,14 @@ def init_session_state():
         st.session_state.connected = False
     if "connect_msg" not in st.session_state:
         st.session_state.connect_msg = ""
+    if "editing_index" not in st.session_state:
+        st.session_state.editing_index = None
+    # form fields
+    for k, v in {
+        'ten_kpi':'', 'dvt':'', 'ke_hoach':0.0, 'thuc_hien':0.0, 'trong_so':0.0,
+        'bo_phan':'Tổ Kinh doanh tổng hợp', 'thang':datetime.now().month, 'nam':datetime.now().year
+    }.items():
+        st.session_state.setdefault(k, v)
 
 init_session_state()
 
@@ -215,7 +259,7 @@ with st.form("kpi_input_form", clear_on_submit=False):
         thang = st.selectbox("7) Tháng", list(range(1,13)), index=datetime.now().month-1)
         nam = st.number_input("8) Năm", min_value=2000, max_value=2100, value=datetime.now().year, step=1)
         # Điểm KPI tự tính & hiển thị
-        diem_kpi_preview = compute_kpi_score(thuc_hien, ke_hoach, trong_so)
+        diem_kpi_preview = compute_kpi_score_dynamic(st.session_state.get('ten_kpi', ''), st.session_state.thuc_hien, st.session_state.ke_hoach, st.session_state.trong_so)
         st.metric("9) Điểm KPI (xem trước)", diem_kpi_preview)
 
     submitted = st.form_submit_button("➕ Thêm vào bảng tạm")
@@ -229,7 +273,7 @@ with st.form("kpi_input_form", clear_on_submit=False):
             "Bộ phận/người phụ trách": bo_phan.strip(),
             "Tháng": int(thang),
             "Năm": int(nam),
-            "Điểm KPI": compute_kpi_score(thuc_hien, ke_hoach, trong_so),
+            "Điểm KPI": compute_kpi_score_dynamic(st.session_state.ten_kpi, st.session_state.thuc_hien, st.session_state.ke_hoach, st.session_state.trong_so),
         }
         st.session_state.kpi_rows.append(row)
         st.success("Đã thêm 1 dòng KPI vào bảng tạm.")
