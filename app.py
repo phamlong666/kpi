@@ -189,15 +189,16 @@ def _inject_ui_enhancements():
     .title-card .subtitle {margin:6px 0 0 0;color:#444}
     .section-title {font-size:24px;font-weight:800;margin:6px 0 12px 0;color:#222}
     /* tăng cỡ chữ trong bảng */
-    [data-testid="stDataFrame"] div, [data-testid="stDataFrame"] span { font-size: 15.5px !important; }
-    .stTextInput>div>div>input, .stNumberInput input { font-size: 16px !important; }
-    .stButton>button { font-size: 15px !important; }
-    .floating-logo {
-      position: fixed; right: 22px; bottom: 22px; width: 56px; height: 56px;
-      border-radius: 50%; box-shadow:0 6px 16px rgba(0,0,0,0.15); z-index: 9999;
-      background: #ffffffaa; backdrop-filter: blur(4px); display: inline-block;
-      object-fit: cover; text-align:center; line-height:56px; font-size:28px; animation: pop .6s ease-out;
-    }
+    [data-testid="stDataFrame"] div, [data-testid="stDataFrame"] span { font-size: 17px !important; }
+[data-testid="stDataEditor"] div, [data-testid="stDataEditor"] span { font-size: 17px !important; }
+.stTextInput>div>div>input, .stNumberInput input { font-size: 17px !important; }
+.stButton>button { font-size: 16px !important; }
+.floating-logo {
+  position: fixed; right: 22px; top: 22px; width: 68px; height: 68px;
+  border-radius: 50%; box-shadow:0 6px 16px rgba(0,0,0,0.15); z-index: 9999;
+  background: #ffffffaa; backdrop-filter: blur(4px); display: inline-block;
+  object-fit: cover; text-align:center; line-height:68px; font-size:34px; animation: pop .6s ease-out;
+}
     @keyframes pop { 0% { transform: scale(.6); opacity:.2 } 100% { transform: scale(1); opacity:1 } }
     </style>
     """
@@ -509,49 +510,82 @@ else:
         base = base[mask].copy()
 
     st.markdown("**Nhập cột 'Thực hiện (tháng)' để tính điểm – hiển thị điểm KPI ngay trong bảng:**")
-    y_key = f"work_{chosen_year}_{chosen_month}"
-    st.session_state[y_key] = base.copy()
-    _work_scored = autoscore_dataframe_onemonth(st.session_state[y_key])
-    edited = st.data_editor(
-        _work_scored,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Thực hiện (tháng)": st.column_config.NumberColumn(format="%f"),
-            "Trọng số": st.column_config.NumberColumn(format="%f"),
-            "Điểm KPI": st.column_config.NumberColumn(format="%f", disabled=True),
-        },
-        num_rows="fixed",
-    )
-    # Lưu lại thay đổi
-    to_save = edited.copy()
-    if "Điểm KPI" in to_save.columns:
-        to_save = to_save.drop(columns=["Điểm KPI"])  # sẽ được tính lại mỗi lần render
-    st.session_state[y_key] = to_save
 
-    # Xuất ngay bảng đã tính điểm
-    scored_export = autoscore_dataframe_onemonth(st.session_state[y_key])
-    colL, colR = st.columns([1,1])
-    with colL:
-        if st.button("💾 Xuất Excel (.xlsx) – bảng 1 tháng"):
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-                scored_export.to_excel(writer, index=False, sheet_name="KPI_Input")
-                wb = writer.book
-                ws = writer.sheets["KPI_Input"]
-                fmt_header = wb.add_format({"bold": True, "bg_color": "#E2F0D9", "border": 1})
-                fmt_cell = wb.add_format({"border": 1})
-                ws.set_row(0, 22, fmt_header)
-                for i, _ in enumerate(scored_export.columns):
-                    ws.set_column(i, i, 22, fmt_cell)
-            st.download_button(
-                label="Tải về KPI_Input",
-                data=output.getvalue(),
-                file_name=f"KPI_Input_{int(chosen_year)}_{int(chosen_month):02d}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-    with colR:
-        st.caption("Bảng trên đã hiển thị điểm KPI trực tiếp – gọn giao diện.")
+# ==== State merge: GIỮ GIÁ TRỊ NHẬP TAY GIỮA CÁC LẦN CHẠY ====
+# Tạo khóa dòng ổn định để ghép giá trị đã nhập
+base = base.reset_index(drop=True)
+base["__row_key"] = (
+    base["STT"].astype(str).fillna("") + "|" +
+    base["Tên chỉ tiêu (KPI)"].astype(str).fillna("") + "|" +
+    base["Bộ phận/người phụ trách"].astype(str).fillna("")
+)
+
+y_key = f"work_{chosen_year}_{chosen_month}"
+prev = st.session_state.get(y_key)
+if prev is not None and not pd.DataFrame(prev).empty:
+    prev_df = pd.DataFrame(prev)
+    if "__row_key" not in prev_df.columns:
+        prev_df["__row_key"] = (
+            prev_df["STT"].astype(str).fillna("") + "|" +
+            prev_df["Tên chỉ tiêu (KPI)"].astype(str).fillna("") + "|" +
+            prev_df["Bộ phận/người phụ trách"].astype(str).fillna("")
+        )
+    keep_cols = ["__row_key", "Thực hiện (tháng)", "Trọng số"]
+    merged = base.merge(prev_df[keep_cols], on="__row_key", how="left", suffixes=("", "_old"))
+    for c in ["Thực hiện (tháng)", "Trọng số"]:
+        # nếu người dùng đã nhập trước đó thì giữ lại
+        merged[c] = merged[c].where(merged[c].notna(), merged[f"{c}_old"]) 
+        if f"{c}_old" in merged.columns:
+            merged.drop(columns=[f"{c}_old"], inplace=True)
+    working = merged
+else:
+    working = base.copy()
+
+# Lưu state tạm thời rồi tính điểm để render
+st.session_state[y_key] = working.copy()
+_work_scored = autoscore_dataframe_onemonth(st.session_state[y_key])
+
+edited = st.data_editor(
+    _work_scored,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Thực hiện (tháng)": st.column_config.NumberColumn(format="%f"),
+        "Trọng số": st.column_config.NumberColumn(format="%f"),
+        "Điểm KPI": st.column_config.NumberColumn(format="%f", disabled=True),
+    },
+    num_rows="fixed",
+)
+
+# Sau khi nhập, cập nhật lại session và giữ __row_key để lần sau merge
+to_save = edited.copy()
+if "Điểm KPI" in to_save.columns:
+    to_save = to_save.drop(columns=["Điểm KPI"])  # sẽ tính lại khi render
+st.session_state[y_key] = to_save
+
+# Xuất ngay bảng đã tính điểm
+scored_export = autoscore_dataframe_onemonth(st.session_state[y_key])
+colL, colR = st.columns([1,1])
+with colL:
+    if st.button("💾 Xuất Excel (.xlsx) – bảng 1 tháng"):
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            scored_export.to_excel(writer, index=False, sheet_name="KPI_Input")
+            wb = writer.book
+            ws = writer.sheets["KPI_Input"]
+            fmt_header = wb.add_format({"bold": True, "bg_color": "#E2F0D9", "border": 1})
+            fmt_cell = wb.add_format({"border": 1})
+            ws.set_row(0, 22, fmt_header)
+            for i, _ in enumerate(scored_export.columns):
+                ws.set_column(i, i, 22, fmt_cell)
+        st.download_button(
+            label="Tải về KPI_Input",
+            data=output.getvalue(),
+            file_name=f"KPI_Input_{int(chosen_year)}_{int(chosen_month):02d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+with colR:
+    st.caption("Bảng trên đã hiển thị điểm KPI trực tiếp – gọn giao diện.")
 
 # ------------------------
 # Footer
