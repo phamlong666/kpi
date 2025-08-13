@@ -195,7 +195,7 @@ def _inject_ui_enhancements():
       background: #ffffffaa; backdrop-filter: blur(4px); display: inline-block;
       object-fit: cover; text-align:center; line-height:56px; font-size:28px; animation: pop .6s ease-out;
     }}
-    @keyframes pop { 0% { transform: scale(.6); opacity:.2 } 100% { transform: scale(1); opacity:1 } }
+    @keyframes pop {{ 0% {{ transform: scale(.6); opacity:.2 }} 100% {{ transform: scale(1); opacity:1 }} }}
     </style>
     {logo_tag}
     """, unsafe_allow_html=True)
