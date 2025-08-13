@@ -161,8 +161,7 @@ def init_session_state():
 # ------------------------
 
 def _inject_ui_enhancements():
-    import base64, os
-    # Try to load a round logo from /mnt/data/logo.png; fallback to an emoji
+    import os, base64
     logo_tag = '<div class="floating-logo">⚡</div>'
     try:
         if os.path.exists("/mnt/data/logo.png"):
@@ -172,50 +171,38 @@ def _inject_ui_enhancements():
     except Exception:
         pass
 
-    st.markdown(f"""
+    css = """
     <style>
-    .title-card {{
+    .title-card {
       padding:14px 18px;border:1px solid #ececec;border-radius:12px;background:#ffffff;
       box-shadow:0 2px 8px rgba(0,0,0,0.04);
-    }}
-    .title-card h1 {{
+    }
+    .title-card h1 {
       margin:0;font-size:28px;line-height:1.25;font-weight:800;color:#0B5ED7;
       display:flex;align-items:center;gap:10px;
-    }}
-    .title-card .title-icon {{
+    }
+    .title-card .title-icon {
       font-size:26px;background:#0B5ED7;color:#fff;width:36px;height:36px;
       border-radius:50%;display:inline-flex;align-items:center;justify-content:center;
       box-shadow:0 2px 6px rgba(11,94,215,.35);
-    }}
-    .title-card .subtitle {{margin:6px 0 0 0;color:#444}}
+    }
+    .title-card .subtitle {margin:6px 0 0 0;color:#444}
     .section-title {font-size:24px;font-weight:800;margin:6px 0 12px 0;color:#222}
-/* tăng cỡ chữ trong bảng */
-[data-testid="stDataFrame"] div, [data-testid="stDataFrame"] span { font-size: 15.5px !important; }
-.stTextInput>div>div>input, .stNumberInput input { font-size: 16px !important; }
-.stButton>button { font-size: 15px !important; }}
-    .floating-logo {{
+    /* tăng cỡ chữ trong bảng */
+    [data-testid="stDataFrame"] div, [data-testid="stDataFrame"] span { font-size: 15.5px !important; }
+    .stTextInput>div>div>input, .stNumberInput input { font-size: 16px !important; }
+    .stButton>button { font-size: 15px !important; }
+    .floating-logo {
       position: fixed; right: 22px; bottom: 22px; width: 56px; height: 56px;
       border-radius: 50%; box-shadow:0 6px 16px rgba(0,0,0,0.15); z-index: 9999;
       background: #ffffffaa; backdrop-filter: blur(4px); display: inline-block;
       object-fit: cover; text-align:center; line-height:56px; font-size:28px; animation: pop .6s ease-out;
-    }}
-    @keyframes pop {{ 0% {{ transform: scale(.6); opacity:.2 }} 100% {{ transform: scale(1); opacity:1 }} }}
+    }
+    @keyframes pop { 0% { transform: scale(.6); opacity:.2 } 100% { transform: scale(1); opacity:1 } }
     </style>
-    {logo_tag}
-    """, unsafe_allow_html=True)
-    if "kpi_rows" not in st.session_state:
-        st.session_state.kpi_rows = []
-    if "connected" not in st.session_state:
-        st.session_state.connected = False
-    if "connect_msg" not in st.session_state:
-        st.session_state.connect_msg = ""
-    if "editing_index" not in st.session_state:
-        st.session_state.editing_index = None
-    for k, v in {
-        'ten_kpi':'', 'dvt':'', 'ke_hoach':0.0, 'thuc_hien':0.0, 'trong_so':0.0,
-        'bo_phan':'Tổ Kinh doanh tổng hợp', 'thang':datetime.now().month, 'nam':datetime.now().year
-    }.items():
-        st.session_state.setdefault(k, v)
+    """
+    st.markdown(css, unsafe_allow_html=True)
+    st.markdown(logo_tag, unsafe_allow_html=True)
 
 init_session_state()
 
@@ -487,6 +474,84 @@ else:
     for _col in ["Kế hoạch (tháng)", "Thực hiện (tháng)", "Trọng số", "Điểm KPI", "Tháng", "Năm"]:
         if _col in df1.columns:
             df1[_col] = pd.to_numeric(df1[_col], errors="coerce")
+
+    # ==== BẢNG NHẬP & TÍNH ĐIỂM (MỘT BẢNG DUY NHẤT) ====
+    colM, colY = st.columns(2)
+    with colM:
+        month_default = int(df1["Tháng"].iloc[0]) if "Tháng" in df1.columns and len(df1)>0 else 7
+        chosen_month = st.number_input("Tháng", min_value=1, max_value=12, value=month_default, step=1)
+    with colY:
+        year_default = int(df1["Năm"].iloc[0]) if "Năm" in df1.columns and len(df1)>0 else datetime.now().year
+        chosen_year = st.number_input("Năm", min_value=2000, max_value=2100, value=year_default, step=1)
+
+    base = df1[(df1["Tháng"].astype(int) == int(chosen_month)) & (df1["Năm"].astype(int) == int(chosen_year))].copy()
+
+    with st.expander("🔎 Tìm nhanh theo 'Phương pháp đo kết quả' / Tên KPI / Bộ phận"):
+        q = st.text_input("Từ khóa", value="")
+        col1, col2 = st.columns(2)
+        with col1:
+            departments = [x for x in sorted(base["Bộ phận/người phụ trách"].dropna().astype(str).unique().tolist()) if x]
+            dept = st.multiselect("Bộ phận", departments, default=[])
+        with col2:
+            units = [x for x in sorted(base["Đơn vị tính"].dropna().astype(str).unique().tolist()) if x]
+            unit = st.multiselect("Đơn vị tính", units, default=[])
+
+        mask = pd.Series([True] * len(base))
+        if q:
+            qlow = q.lower()
+            mask &= base.apply(lambda r: qlow in str(r["Phương pháp đo kết quả"]).lower()
+                                       or qlow in str(r["Tên chỉ tiêu (KPI)"]).lower()
+                                       or qlow in str(r["Bộ phận/người phụ trách"]).lower(), axis=1)
+        if dept:
+            mask &= base["Bộ phận/người phụ trách"].astype(str).isin(dept)
+        if unit:
+            mask &= base["Đơn vị tính"].astype(str).isin(unit)
+        base = base[mask].copy()
+
+    st.markdown("**Nhập cột 'Thực hiện (tháng)' để tính điểm – hiển thị điểm KPI ngay trong bảng:**")
+    y_key = f"work_{chosen_year}_{chosen_month}"
+    st.session_state[y_key] = base.copy()
+    _work_scored = autoscore_dataframe_onemonth(st.session_state[y_key])
+    edited = st.data_editor(
+        _work_scored,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Thực hiện (tháng)": st.column_config.NumberColumn(format="%f"),
+            "Trọng số": st.column_config.NumberColumn(format="%f"),
+            "Điểm KPI": st.column_config.NumberColumn(format="%f", disabled=True),
+        },
+        num_rows="fixed",
+    )
+    # Lưu lại thay đổi
+    to_save = edited.copy()
+    if "Điểm KPI" in to_save.columns:
+        to_save = to_save.drop(columns=["Điểm KPI"])  # sẽ được tính lại mỗi lần render
+    st.session_state[y_key] = to_save
+
+    # Xuất ngay bảng đã tính điểm
+    scored_export = autoscore_dataframe_onemonth(st.session_state[y_key])
+    colL, colR = st.columns([1,1])
+    with colL:
+        if st.button("💾 Xuất Excel (.xlsx) – bảng 1 tháng"):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                scored_export.to_excel(writer, index=False, sheet_name="KPI_Input")
+                wb = writer.book
+                ws = writer.sheets["KPI_Input"]
+                fmt_header = wb.add_format({"bold": True, "bg_color": "#E2F0D9", "border": 1})
+                fmt_cell = wb.add_format({"border": 1})
+                ws.set_row(0, 22, fmt_header)
+                for i, _ in enumerate(scored_export.columns):
+                    ws.set_column(i, i, 22, fmt_cell)
+            st.download_button(
+                label="Tải về KPI_Input",
+                data=output.getvalue(),
+                file_name=f"KPI_Input_{int(chosen_year)}_{int(chosen_month):02d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+    with colR:
+        st.caption("Bảng trên đã hiển thị điểm KPI trực tiếp – gọn giao diện.")
 
 # ------------------------
 # Footer
