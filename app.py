@@ -189,17 +189,18 @@ def _inject_ui_enhancements():
     .title-card .subtitle {margin:6px 0 0 0;color:#444}
     .section-title {font-size:24px;font-weight:800;margin:6px 0 12px 0;color:#222}
     /* tăng cỡ chữ trong bảng */
-    [data-testid="stDataFrame"] div, [data-testid="stDataFrame"] span { font-size: 18px !important; }
-[data-testid="stDataEditor"] div, [data-testid="stDataEditor"] span { font-size: 18px !important; }
-[data-testid="stDataEditorGrid"] * { font-size: 18px !important; }
-html, body, [data-testid="stAppViewContainer"] * { font-size: 18px; }
-.stTextInput>div>div>input, .stNumberInput input { font-size: 17px !important; }
-.stButton>button { font-size: 16px !important; }
+    [data-testid="stDataFrame"] * { font-size: 20px !important; }
+[data-testid="stDataEditor"] * { font-size: 20px !important; }
+[data-testid="stDataEditorGrid"] * { font-size: 20px !important; }
+html, body, [data-testid="stAppViewContainer"] * { font-size: 20px; }
+.stTextInput>div>div>input, .stNumberInput input { font-size: 19px !important; }
+.stButton>button { font-size: 18px !important; }
 .floating-logo {
-  position: fixed; left: 22px; bottom: 96px; width: 72px; height: 72px;
-  border-radius: 50%; box-shadow:0 6px 16px rgba(0,0,0,0.15); z-index: 9999;
+  position: fixed; right: 16px; top: 86px; width: 76px; height: 76px;
+  border-radius: 50%; box-shadow:0 6px 16px rgba(0,0,0,0.15); z-index: 99999;
   background: #ffffffee; backdrop-filter: blur(4px); display: inline-block;
-  object-fit: cover; text-align:center; line-height:72px; font-size:36px; animation: pop .6s ease-out;
+  object-fit: cover; text-align:center; line-height:76px; font-size:38px; animation: pop .6s ease-out;
+  pointer-events: none;
 }
     @keyframes pop { 0% { transform: scale(.6); opacity:.2 } 100% { transform: scale(1); opacity:1 } }
     </style>
@@ -397,8 +398,18 @@ def _forecast_point_from_plan_actual(plan, actual, max_point: float = 3.0, thres
 
 
 def autoscore_row_onemonth(row: pd.Series) -> float:
-    name = str(row.get("Tên chỉ tiêu (KPI)", ""))
-    method = str(row.get("Phương pháp đo kết quả", ""))
+    import unicodedata
+    # Chuẩn hoá chuỗi: bỏ dấu/ghép dấu để nhận diện chắc chắn "Dự báo tổng thương phẩm"
+    def _norm(s: str) -> str:
+        if not isinstance(s, str):
+            s = str(s or "")
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(ch for ch in s if not unicodedata.combining(ch)).lower()
+        s = " ".join(s.split())
+        return s
+
+    name = row.get("Tên chỉ tiêu (KPI)", "")
+    method = row.get("Phương pháp đo kết quả", "")
     plan = row.get("Kế hoạch (tháng)")
     actual = row.get("Thực hiện (tháng)")
 
@@ -408,19 +419,13 @@ def autoscore_row_onemonth(row: pd.Series) -> float:
     except Exception:
         return row.get("Điểm KPI", None)
 
-    txt = (name + " " + method).lower()
-    # Nhận diện siêu đơn giản & chắc chắn cho 2 KPI Dự báo
-    if "dự báo tổng thương phẩm" in txt:
+    txt = _norm(f"{name} {method}")
+    # Bắt 2 KPI dự báo (mọi biến thể, không dấu)
+    if "du bao tong thuong pham" in txt:
         return _forecast_point_from_plan_actual(plan, actual)
 
     # Mặc định: giữ nguyên (nhập tay/hoặc sẽ bổ sung rule)
     return row.get("Điểm KPI", None)
-    if TOTAL_FORECAST_REGEX.search(name) or TOTAL_FORECAST_REGEX.search(method):
-        return _forecast_point_from_plan_actual(plan, actual)
-    if SEGMENT_FORECAST_REGEX.search(name) or SEGMENT_FORECAST_REGEX.search(method):
-        return _forecast_point_from_plan_actual(plan, actual)
-    return row.get("Điểm KPI", None)
-
 
 def autoscore_dataframe_onemonth(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -559,6 +564,7 @@ _work_scored = autoscore_dataframe_onemonth(st.session_state[y_key])
 
 edited = st.data_editor(
     _work_scored,
+    key=f"editor_{chosen_year}_{chosen_month}",
     use_container_width=True,
     hide_index=True,
     column_config={
@@ -569,11 +575,17 @@ edited = st.data_editor(
     num_rows="fixed",
 )
 
-# Sau khi nhập, cập nhật lại session và giữ __row_key để lần sau merge
-to_save = edited.copy()
-if "Điểm KPI" in to_save.columns:
-    to_save = to_save.drop(columns=["Điểm KPI"])  # sẽ tính lại khi render
-st.session_state[y_key] = to_save
+# TÍNH LẠI ngay theo giá trị vừa nhập và lưu state (để bảng hiển thị đúng ngay lần kế tiếp)
+edited_scored = autoscore_dataframe_onemonth(edited.copy())
+# Lưu nhưng bỏ cột tính toán (sẽ luôn tính lại khi render)
+to_save = edited_scored.drop(columns=["Điểm KPI"]) if "Điểm KPI" in edited_scored.columns else edited_scored
+_prev = st.session_state.get(y_key)
+if _prev is None or not pd.DataFrame(_prev).equals(to_save):
+    st.session_state[y_key] = to_save
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
 
 # Xuất ngay bảng đã tính điểm
 scored_export = autoscore_dataframe_onemonth(st.session_state[y_key])
