@@ -140,7 +140,21 @@ def get_gspread_client_if_possible():
         return None, str(e)
 
 # --- Session state ---
-def init_session_state()
+def init_session_state():
+    if "kpi_rows" not in st.session_state:
+        st.session_state.kpi_rows = []
+    if "connected" not in st.session_state:
+        st.session_state.connected = False
+    if "connect_msg" not in st.session_state:
+        st.session_state.connect_msg = ""
+    if "editing_index" not in st.session_state:
+        st.session_state.editing_index = None
+    for k, v in {
+        'ten_kpi':'', 'dvt':'', 'ke_hoach':0.0, 'thuc_hien':0.0, 'trong_so':0.0,
+        'bo_phan':'Tổ Kinh doanh tổng hợp', 'thang':datetime.now().month, 'nam':datetime.now().year
+    }.items():
+        st.session_state.setdefault(k, v)
+
 
 # ------------------------
 # 3.5) UI ENHANCEMENTS (Logo tròn + style heading)
@@ -185,7 +199,6 @@ def _inject_ui_enhancements():
     </style>
     {logo_tag}
     """, unsafe_allow_html=True)
-:
     if "kpi_rows" not in st.session_state:
         st.session_state.kpi_rows = []
     if "connected" not in st.session_state:
