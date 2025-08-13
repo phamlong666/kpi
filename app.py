@@ -297,7 +297,7 @@ with cD:
     )
 
 # ------------------------
-# 6) NẠP FILE CHUẨN 1 THÁNG → NHẬP TH & AUTO-SCORE
+# 6) NẠP FILE CHUẨN 1 THÁNG → NHẬP TH & AUTO-SCORE (HỖ TRỢ EXCEL & CSV)
 # ------------------------
 st.markdown("---")
 st.subheader("4) Nạp file chuẩn 1 tháng → Nhập 'Thực hiện (tháng)' → Tự tính điểm cho 2 chỉ tiêu Dự báo")
@@ -307,6 +307,7 @@ SEGMENT_FORECAST_REGEX = re.compile(r"dự\s*báo.*tổng\s*thương\s*phẩm.*(
 
 @st.cache_data(show_spinner=False)
 def load_template_from_bytes(b: bytes) -> pd.DataFrame:
+    """Đọc Excel .xlsx (cần openpyxl) và trả về DataFrame đã chuẩn cột."""
     xls = pd.ExcelFile(BytesIO(b))
     if "KPI_Input" not in xls.sheet_names:
         raise ValueError("Không tìm thấy sheet 'KPI_Input' trong file.")
@@ -330,7 +331,6 @@ def _forecast_point_from_plan_actual(plan, actual, max_point: float = 3.0, thres
     if plan == 0:
         return 0.0
     error_pct = (actual - plan) / plan * 100.0
-    # dùng cùng luật trừ điểm
     abs_err = abs(error_pct)
     if abs_err <= threshold:
         return max_point
@@ -344,13 +344,10 @@ def autoscore_row_onemonth(row: pd.Series) -> float:
     method = str(row.get("Phương pháp đo kết quả", ""))
     plan = row.get("Kế hoạch (tháng)")
     actual = row.get("Thực hiện (tháng)")
-
-    # Chỉ tính khi có KH & TH dạng số
     try:
         float(plan); float(actual)
     except Exception:
         return row.get("Điểm KPI", None)
-
     if TOTAL_FORECAST_REGEX.search(name) or TOTAL_FORECAST_REGEX.search(method):
         return _forecast_point_from_plan_actual(plan, actual)
     if SEGMENT_FORECAST_REGEX.search(name) or SEGMENT_FORECAST_REGEX.search(method):
@@ -365,36 +362,68 @@ def autoscore_dataframe_onemonth(df: pd.DataFrame) -> pd.DataFrame:
     out["Điểm KPI"] = out.apply(autoscore_row_onemonth, axis=1)
     return out
 
-# Chọn nguồn file
-default_path = "/mnt/data/KPI_OneMonth_Template.xlsx"
-mode = st.radio("Nguồn file 1 tháng", ["Dùng đường dẫn hệ thống", "Tải file lên"], horizontal=True)
+# Chọn nguồn file (có hỗ trợ CSV khi thiếu openpyxl)
+default_excel_path = "/mnt/data/KPI_OneMonth_Template.xlsx"
+default_csv_hint = "Nếu môi trường thiếu openpyxl, dùng CSV: KPI_Input_template.csv"
+mode = st.radio(
+    "Nguồn file 1 tháng",
+    ["Dùng đường dẫn hệ thống (Excel .xlsx)", "Tải Excel (.xlsx)", "Tải CSV (.csv)"],
+    horizontal=True
+)
+
 file_bytes = None
-if mode == "Dùng đường dẫn hệ thống":
-    path = st.text_input("Path", value=default_path)
-    if st.button("📂 Đọc file từ path"):
+df1 = pd.DataFrame()
+if mode == "Dùng đường dẫn hệ thống (Excel .xlsx)":
+    path = st.text_input("Path Excel", value=default_excel_path)
+    if st.button("📂 Đọc Excel từ path"):
         try:
             with open(path, "rb") as f:
                 file_bytes = f.read()
+            df1 = load_template_from_bytes(file_bytes)
         except Exception as e:
-            st.error(f"Không đọc được file: {e}")
-else:
-    up = st.file_uploader("Tải file mẫu KPI_OneMonth_Template.xlsx", type=["xlsx"]) 
-    if up:
-        file_bytes = up.read()
+            st.error(f"Lỗi khi đọc Excel (.xlsx): {e}")
+            st.info(default_csv_hint)
+elif mode == "Tải Excel (.xlsx)":
+    up = st.file_uploader("Tải file Excel KPI_OneMonth_Template.xlsx", type=["xlsx"])
+    if up is not None:
+        try:
+            file_bytes = up.read()
+            df1 = load_template_from_bytes(file_bytes)
+        except Exception as e:
+            st.error(f"Lỗi khi đọc Excel (.xlsx): {e}")
+            st.info(default_csv_hint)
+else:  # CSV mode
+    upc = st.file_uploader("Tải file CSV (KPI_Input_template.csv)", type=["csv"])
+    if upc is not None:
+        try:
+            df1 = pd.read_csv(upc)
+        except Exception as e:
+            st.error(f"Lỗi khi đọc CSV: {e}")
 
-if file_bytes:
-    try:
-        df1 = load_template_from_bytes(file_bytes)
-    except Exception as e:
-        st.error(f"Lỗi khi đọc file: {e}")
-        df1 = pd.DataFrame()
+# Guard: nếu chưa đọc được dữ liệu hợp lệ thì dừng ở đây
+if df1 is None or df1.empty:
+    st.info("⚠️ Chưa có dữ liệu hợp lệ. Vui lòng chọn 1 trong 3 cách: nhập path Excel, tải Excel, hoặc tải CSV.")
+else:
+    # Kiểm tra cột bắt buộc
+    required = [
+        "STT", "Nhóm/Parent", "Tên chỉ tiêu (KPI)", "Phương pháp đo kết quả",
+        "Đơn vị tính", "Bộ phận/người phụ trách", "Kế hoạch (tháng)",
+        "Thực hiện (tháng)", "Trọng số", "Điểm KPI", "Tháng", "Năm"
+    ]
+    missing = [c for c in required if c not in df1.columns]
+    if missing:
+        st.error(f"Thiếu cột bắt buộc: {missing}")
+        st.write("Các cột hiện có:", list(df1.columns))
+        st.stop()
 
     # Chọn tháng/năm để lọc
     colM, colY = st.columns(2)
     with colM:
-        chosen_month = st.number_input("Tháng", min_value=1, max_value=12, value=int(df1["Tháng"].iloc[0]) if not df1.empty else 7, step=1)
+        month_default = int(df1["Tháng"].iloc[0]) if "Tháng" in df1.columns and len(df1)>0 else 7
+        chosen_month = st.number_input("Tháng", min_value=1, max_value=12, value=month_default, step=1)
     with colY:
-        chosen_year = st.number_input("Năm", min_value=2000, max_value=2100, value=int(df1["Năm"].iloc[0]) if not df1.empty else datetime.now().year, step=1)
+        year_default = int(df1["Năm"].iloc[0]) if "Năm" in df1.columns and len(df1)>0 else datetime.now().year
+        chosen_year = st.number_input("Năm", min_value=2000, max_value=2100, value=year_default, step=1)
 
     base = df1[(df1["Tháng"].astype(int) == int(chosen_month)) & (df1["Năm"].astype(int) == int(chosen_year))].copy()
 
@@ -412,8 +441,8 @@ if file_bytes:
         if q:
             qlow = q.lower()
             mask &= base.apply(lambda r: qlow in str(r["Phương pháp đo kết quả"]).lower() \
-                                       or qlow in str(r["Tên chỉ tiêu (KPI)"]).lower() \
-                                       or qlow in str(r["Bộ phận/người phụ trách"]).lower(), axis=1)
+                                           or qlow in str(r["Tên chỉ tiêu (KPI)"]).lower() \
+                                           or qlow in str(r["Bộ phận/người phụ trách"]).lower(), axis=1)
         if dept:
             mask &= base["Bộ phận/người phụ trách"].astype(str).isin(dept)
         if unit:
