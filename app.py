@@ -189,15 +189,17 @@ def _inject_ui_enhancements():
     .title-card .subtitle {margin:6px 0 0 0;color:#444}
     .section-title {font-size:24px;font-weight:800;margin:6px 0 12px 0;color:#222}
     /* tăng cỡ chữ trong bảng */
-    [data-testid="stDataFrame"] div, [data-testid="stDataFrame"] span { font-size: 17px !important; }
-[data-testid="stDataEditor"] div, [data-testid="stDataEditor"] span { font-size: 17px !important; }
+    [data-testid="stDataFrame"] div, [data-testid="stDataFrame"] span { font-size: 18px !important; }
+[data-testid="stDataEditor"] div, [data-testid="stDataEditor"] span { font-size: 18px !important; }
+[data-testid="stDataEditorGrid"] * { font-size: 18px !important; }
+html, body, [data-testid="stAppViewContainer"] * { font-size: 18px; }
 .stTextInput>div>div>input, .stNumberInput input { font-size: 17px !important; }
 .stButton>button { font-size: 16px !important; }
 .floating-logo {
-  position: fixed; right: 22px; top: 22px; width: 68px; height: 68px;
+  position: fixed; left: 22px; bottom: 96px; width: 72px; height: 72px;
   border-radius: 50%; box-shadow:0 6px 16px rgba(0,0,0,0.15); z-index: 9999;
-  background: #ffffffaa; backdrop-filter: blur(4px); display: inline-block;
-  object-fit: cover; text-align:center; line-height:68px; font-size:34px; animation: pop .6s ease-out;
+  background: #ffffffee; backdrop-filter: blur(4px); display: inline-block;
+  object-fit: cover; text-align:center; line-height:72px; font-size:36px; animation: pop .6s ease-out;
 }
     @keyframes pop { 0% { transform: scale(.6); opacity:.2 } 100% { transform: scale(1); opacity:1 } }
     </style>
@@ -399,10 +401,20 @@ def autoscore_row_onemonth(row: pd.Series) -> float:
     method = str(row.get("Phương pháp đo kết quả", ""))
     plan = row.get("Kế hoạch (tháng)")
     actual = row.get("Thực hiện (tháng)")
+
+    # Chỉ tính khi có KH & TH dạng số
     try:
-        float(plan); float(actual)
+        plan = float(plan); actual = float(actual)
     except Exception:
         return row.get("Điểm KPI", None)
+
+    txt = (name + " " + method).lower()
+    # Nhận diện siêu đơn giản & chắc chắn cho 2 KPI Dự báo
+    if "dự báo tổng thương phẩm" in txt:
+        return _forecast_point_from_plan_actual(plan, actual)
+
+    # Mặc định: giữ nguyên (nhập tay/hoặc sẽ bổ sung rule)
+    return row.get("Điểm KPI", None)
     if TOTAL_FORECAST_REGEX.search(name) or TOTAL_FORECAST_REGEX.search(method):
         return _forecast_point_from_plan_actual(plan, actual)
     if SEGMENT_FORECAST_REGEX.search(name) or SEGMENT_FORECAST_REGEX.search(method):
