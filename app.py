@@ -10,6 +10,7 @@ import re
 # ---- Cấu hình trang ----
 st.set_page_config(
     page_title="KPI Scorer – Định Hóa (Full Suite)",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -139,7 +140,52 @@ def get_gspread_client_if_possible():
         return None, str(e)
 
 # --- Session state ---
-def init_session_state():
+def init_session_state()
+
+# ------------------------
+# 3.5) UI ENHANCEMENTS (Logo tròn + style heading)
+# ------------------------
+
+def _inject_ui_enhancements():
+    import base64, os
+    # Try to load a round logo from /mnt/data/logo.png; fallback to an emoji
+    logo_tag = '<div class="floating-logo">⚡</div>'
+    try:
+        if os.path.exists("/mnt/data/logo.png"):
+            with open("/mnt/data/logo.png", "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            logo_tag = f'<img class="floating-logo" src="data:image/png;base64,{b64}" />'
+    except Exception:
+        pass
+
+    st.markdown(f"""
+    <style>
+    .title-card {{
+      padding:14px 18px;border:1px solid #ececec;border-radius:12px;background:#ffffff;
+      box-shadow:0 2px 8px rgba(0,0,0,0.04);
+    }}
+    .title-card h1 {{
+      margin:0;font-size:28px;line-height:1.25;font-weight:800;color:#0B5ED7;
+      display:flex;align-items:center;gap:10px;
+    }}
+    .title-card .title-icon {{
+      font-size:26px;background:#0B5ED7;color:#fff;width:36px;height:36px;
+      border-radius:50%;display:inline-flex;align-items:center;justify-content:center;
+      box-shadow:0 2px 6px rgba(11,94,215,.35);
+    }}
+    .title-card .subtitle {{margin:6px 0 0 0;color:#444}}
+    .section-title {{font-size:24px;font-weight:800;margin:6px 0 12px 0;color:#222}}
+    .floating-logo {{
+      position: fixed; right: 22px; bottom: 22px; width: 56px; height: 56px;
+      border-radius: 50%; box-shadow:0 6px 16px rgba(0,0,0,0.15); z-index: 9999;
+      background: #ffffffaa; backdrop-filter: blur(4px); display: inline-block;
+      object-fit: cover; text-align:center; line-height:56px; font-size:28px; animation: pop .6s ease-out;
+    }}
+    @keyframes pop { 0% { transform: scale(.6); opacity:.2 } 100% { transform: scale(1); opacity:1 } }
+    </style>
+    {logo_tag}
+    """, unsafe_allow_html=True)
+:
     if "kpi_rows" not in st.session_state:
         st.session_state.kpi_rows = []
     if "connected" not in st.session_state:
@@ -196,12 +242,16 @@ st.session_state.connect_msg = connect_msg
 # ------------------------
 # 4) HEADER
 # ------------------------
-st.markdown("""
-<div style="padding:14px 18px; border:1px solid #ececec; border-radius:12px; background:#fff9ef">
-  <h1 style="margin:0">KPI Đội quản lý Điện lực khu vực Định Hóa</h1>
-  <p style="margin:6px 0 0 0; color:#555">Nhập thủ công → Xuất Excel chuẩn (9 cột) + Nạp file mẫu 1 tháng để nhập TH và tính điểm</p>
+_inject_ui_enhancements()
+st.markdown(
+    """
+<div class="title-card">
+  <h1><span class="title-icon">⚡</span><span class="title-text">KPI Đội quản lý Điện lực khu vực Định Hóa</span></h1>
+  <p class="subtitle">Nhập thủ công → Xuất Excel chuẩn (9 cột) + Nạp file mẫu 1 tháng để nhập TH và tính điểm</p>
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 st.markdown("## KPI Scorer – Định Hóa (Full Suite)")
 
@@ -217,7 +267,7 @@ if connected:
 # 5) NHẬP KPI THỦ CÔNG & XUẤT EXCEL (LUÔN HIỂN THỊ)
 # ------------------------
 st.markdown("---")
-st.subheader("3) Nhập KPI thủ công & Xuất Excel (9 cột)")
+st.markdown('<h2 class="section-title">3) Nhập KPI thủ công & Xuất Excel (9 cột)</h2>', unsafe_allow_html=True)
 
 with st.form("kpi_input_form", clear_on_submit=False):
     c1, c2, c3 = st.columns([1.2, 1.2, 1])
@@ -300,7 +350,7 @@ with cD:
 # 6) NẠP FILE CHUẨN 1 THÁNG → NHẬP TH & AUTO-SCORE (HỖ TRỢ EXCEL & CSV)
 # ------------------------
 st.markdown("---")
-st.subheader("4) Nạp file chuẩn 1 tháng → Nhập 'Thực hiện (tháng)' → Tự tính điểm cho 2 chỉ tiêu Dự báo")
+st.markdown('<h2 class="section-title">4) Nạp file chuẩn 1 tháng → Nhập \"Thực hiện (tháng)\" → Tự tính điểm cho 2 chỉ tiêu Dự báo</h2>', unsafe_allow_html=True)
 
 TOTAL_FORECAST_REGEX = re.compile(r"dự\s*báo.*tổng\s*thương\s*phẩm(?!.*triệu)", re.IGNORECASE)
 SEGMENT_FORECAST_REGEX = re.compile(r"dự\s*báo.*tổng\s*thương\s*phẩm.*(1\s*triệu|>\s*1\s*triệu|trên\s*1\s*triệu)", re.IGNORECASE)
@@ -415,6 +465,130 @@ else:
         st.error(f"Thiếu cột bắt buộc: {missing}")
         st.write("Các cột hiện có:", list(df1.columns))
         st.stop()
+
+    # Chuẩn hoá kiểu dữ liệu quan trọng (fix CSV không auto-calc)
+    for _col in ["Kế hoạch (tháng)", "Thực hiện (tháng)", "Trọng số", "Điểm KPI", "Tháng", "Năm"]:
+        if _col in df1.columns:
+            df1[_col] = pd.to_numeric(df1[_col], errors="coerce")
+
+    # Chọn tháng/năm để lọc
+    colM, colY = st.columns(2)
+    with colM:
+        month_default = int(df1["Tháng"].iloc[0]) if "Tháng" in df1.columns and len(df1)>0 else 7
+        chosen_month = st.number_input("Tháng", min_value=1, max_value=12, value=month_default, step=1)
+    with colY:
+        year_default = int(df1["Năm"].iloc[0]) if "Năm" in df1.columns and len(df1)>0 else datetime.now().year
+        chosen_year = st.number_input("Năm", min_value=2000, max_value=2100, value=year_default, step=1)
+
+    base = df1[(df1["Tháng"].astype(int) == int(chosen_month)) & (df1["Năm"].astype(int) == int(chosen_year))].copy()
+
+    with st.expander("🔎 Tìm nhanh theo 'Phương pháp đo kết quả' / Tên KPI / Bộ phận"):
+        q = st.text_input("Từ khóa", value="")
+        col1, col2 = st.columns(2)
+        with col1:
+            departments = [x for x in sorted(base["Bộ phận/người phụ trách"].dropna().astype(str).unique().tolist()) if x]
+            dept = st.multiselect("Bộ phận", departments, default=[])
+        with col2:
+            units = [x for x in sorted(base["Đơn vị tính"].dropna().astype(str).unique().tolist()) if x]
+            unit = st.multiselect("Đơn vị tính", units, default=[])
+
+        mask = pd.Series([True] * len(base))
+        if q:
+            qlow = q.lower()
+            mask &= base.apply(lambda r: qlow in str(r["Phương pháp đo kết quả"]).lower() \
+                                           or qlow in str(r["Tên chỉ tiêu (KPI)"]).lower() \
+                                           or qlow in str(r["Bộ phận/người phụ trách"]).lower(), axis=1)
+        if dept:
+            mask &= base["Bộ phận/người phụ trách"].astype(str).isin(dept)
+        if unit:
+            mask &= base["Đơn vị tính"].astype(str).isin(unit)
+        base = base[mask].copy()
+
+    # ===== Chọn dòng & hộp nhập tay (modal nếu hỗ trợ) =====
+    if "working_onemonth" not in st.session_state or st.session_state.working_onemonth is None:
+        st.session_state.working_onemonth = base.copy()
+    else:
+        st.session_state.working_onemonth = base.copy()
+
+    idx_options = list(range(len(st.session_state.working_onemonth)))
+    if idx_options:
+        labels = [f"{i+1}. {st.session_state.working_onemonth.iloc[i]['Tên chỉ tiêu (KPI)']}" for i in idx_options]
+        selected_idx = st.selectbox("Chọn dòng để nhập tay", idx_options, format_func=lambda i: labels[i])
+
+        def _inline_editor(idx:int):
+            row = st.session_state.working_onemonth.iloc[idx]
+            with st.form("edit_row_inline", clear_on_submit=False):
+                st.write(f"**{row['Tên chỉ tiêu (KPI)']}**")
+                st.write(f"Đơn vị: {row.get('Đơn vị tính','')} · Kế hoạch (tháng): **{row.get('Kế hoạch (tháng)','')}**")
+                _act_val = pd.to_numeric(pd.Series([row.get('Thực hiện (tháng)', 0.0)]), errors='coerce').fillna(0.0).iloc[0]
+                _w_val = pd.to_numeric(pd.Series([row.get('Trọng số', 0.0)]), errors='coerce').fillna(0.0).iloc[0]
+                new_actual = st.number_input("Thực hiện (tháng)", value=float(_act_val), step=0.1, format="%.4f")
+                new_weight = st.number_input("Trọng số", value=float(_w_val), step=0.1, format="%.4f")
+                preview = autoscore_row_onemonth(pd.Series({
+                    "Tên chỉ tiêu (KPI)": row["Tên chỉ tiêu (KPI)"],
+                    "Phương pháp đo kết quả": row.get("Phương pháp đo kết quả", ""),
+                    "Kế hoạch (tháng)": row.get("Kế hoạch (tháng)"),
+                    "Thực hiện (tháng)": new_actual
+                }))
+                st.metric("Điểm KPI (xem trước)", preview if preview is not None else 0.0)
+                if st.form_submit_button("💾 Lưu giá trị cho dòng này"):
+                    st.session_state.working_onemonth.at[st.session_state.working_onemonth.index[idx], "Thực hiện (tháng)"] = new_actual
+                    st.session_state.working_onemonth.at[st.session_state.working_onemonth.index[idx], "Trọng số"] = new_weight
+                    st.success("Đã lưu cho dòng đã chọn.")
+
+        # Dialog nếu có
+        if hasattr(st, "experimental_dialog"):
+            @st.experimental_dialog("Nhập tay KPI")
+            def _edit_dialog(idx:int):
+                _inline_editor(idx)
+            if st.button("✏️ Nhập tay dòng đã chọn (cửa sổ)"):
+                _edit_dialog(selected_idx)
+        else:
+            with st.expander("✏️ Nhập tay dòng đã chọn"):
+                _inline_editor(selected_idx)
+
+    # Sau khi nhập tay, dùng working DataFrame để tiếp tục
+    base = st.session_state.working_onemonth.copy()
+
+    st.markdown("**Nhập cột 'Thực hiện (tháng)' để tính điểm (2 chỉ tiêu Dự báo):**")
+    edited = st.data_editor(
+        base,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Thực hiện (tháng)": st.column_config.NumberColumn(format="%f"),
+            "Trọng số": st.column_config.NumberColumn(format="%f"),
+            "Điểm KPI": st.column_config.NumberColumn(format="%f", disabled=True),
+        },
+        num_rows="fixed",
+    )
+
+    scored = autoscore_dataframe_onemonth(edited)
+
+    st.markdown("**Kết quả sau tính điểm:**")
+    st.dataframe(scored, use_container_width=True, hide_index=True)
+
+    colL, colR = st.columns([1,1])
+    with colL:
+        if st.button("💾 Xuất Excel (.xlsx) – bảng 1 tháng"):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                scored.to_excel(writer, index=False, sheet_name="KPI_Input")
+                wb = writer.book
+                ws = writer.sheets["KPI_Input"]
+                fmt_header = wb.add_format({"bold": True, "bg_color": "#E2F0D9", "border": 1})
+                fmt_cell = wb.add_format({"border": 1})
+                ws.set_row(0, 22, fmt_header)
+                for i, _ in enumerate(scored.columns):
+                    ws.set_column(i, i, 22, fmt_cell)
+            st.download_button(
+                label="Tải về KPI_Input",
+                data=output.getvalue(),
+                file_name=f"KPI_Input_{int(chosen_year)}_{int(chosen_month):02d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+    with colR:
+        st.caption("Sẽ bổ sung xuất PDF & tổng hợp theo Bộ phận ở bản sau.")
 
     # Chọn tháng/năm để lọc
     colM, colY = st.columns(2)
