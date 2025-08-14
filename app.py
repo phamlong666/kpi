@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 app.py — KPI - Đội quản lý Điện lực khu vực Định Hóa
-Full one-file app:
-- Hiển thị logo từ GitHub + tiêu đề app
+- Logo từ GitHub + tiêu đề app
 - Đăng nhập / Đăng xuất / Đồng bộ Users từ sheet USE
 - Đổi mật khẩu / Quên mật khẩu (ghi ResetRequests)
 - Nhập KPI từ CSV/XLSX → ghi KPI_DB
 - Báo cáo: tháng hiện tại / so tháng trước / so cùng kỳ
 - Admin: so sánh KPI giữa các đơn vị
-- Bảo mật: kết nối Google Sheets bằng fernet_key + gsa_enc
+- Bảo mật: loader 3 chế độ (Fernet, JSON, base64)
 """
 
 import streamlit as st
@@ -18,18 +17,16 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from io import BytesIO
 import hashlib, uuid, base64, json
-from cryptography.fernet import Fernet
 
 # =========================
 # Page config + Logo + Title
 # =========================
 st.set_page_config(page_title="KPI - Đội quản lý Điện lực khu vực Định Hóa", layout="wide")
-
 st.image("https://raw.githubusercontent.com/phamlong666/kpi/main/logo_hinh_tron.png", width=80)
 st.title("📊 KPI - Đội quản lý Điện lực khu vực Định Hóa")
 
 # =========================
-# Helpers
+# Helpers: Password hash
 # =========================
 def hash_pw(p: str) -> str:
     return hashlib.sha256((p or "").encode()).hexdigest()
@@ -37,37 +34,52 @@ def hash_pw(p: str) -> str:
 def verify_pw(plain: str, hashed: str) -> bool:
     return hash_pw(plain) == str(hashed)
 
-def load_sa_from_secret():
-    gsa_enc_b64 = st.secrets.get("gsa_enc")
-    fernet_key  = st.secrets.get("fernet_key")
-    if not gsa_enc_b64 or not fernet_key:
+# =========================
+# Loader Google SA (multi-mode)
+# =========================
+def _from_plain_block():
+    try:
+        sa = dict(st.secrets["gdrive_service_account"])
+        if "private_key_b64" in st.secrets["gdrive_service_account"]:
+            pk = base64.b64decode(st.secrets["gdrive_service_account"]["private_key_b64"]).decode()
+            sa["private_key"] = pk
+        if "private_key" in sa:
+            sa["private_key"] = sa["private_key"].replace("\\n", "\n")
+        return sa
+    except Exception:
         return None
-    blob = base64.b64decode(gsa_enc_b64.encode())
-    sa_bytes = Fernet(fernet_key.encode()).decrypt(blob)
-    sa = json.loads(sa_bytes.decode())
-    if "private_key" in sa:
-        sa["private_key"] = sa["private_key"].replace("\\n", "\n")
-    return sa
 
-@st.cache_resource(show_spinner=False)
+def load_sa_from_secret():
+    """Ưu tiên Fernet (fernet_key + gsa_enc), fallback JSON / base64."""
+    try:
+        from cryptography.fernet import Fernet
+        gsa_enc_b64 = st.secrets.get("gsa_enc")
+        fernet_key  = st.secrets.get("fernet_key")
+        if gsa_enc_b64 and fernet_key:
+            blob = base64.b64decode(gsa_enc_b64.encode())
+            sa_bytes = Fernet(fernet_key.encode()).decrypt(blob)
+            sa = json.loads(sa_bytes.decode())
+            if "private_key" in sa:
+                sa["private_key"] = sa["private_key"].replace("\\n", "\n")
+            return sa
+    except Exception:
+        st.info("Đang dùng chế độ kết nối dự phòng (không dùng Fernet).")
+    return _from_plain_block()
+
 def get_client():
     sa = load_sa_from_secret()
     if not sa:
-        return None, "Thiếu secrets fernet_key/gsa_enc"
-    try:
-        scope = ["https://spreadsheets.google.com/feeds",
-                 "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(sa, scope)
-        return gspread.authorize(creds), None
-    except Exception as e:
-        return None, f"Lỗi Google auth: {e}"
+        st.stop()
+    scope = ["https://spreadsheets.google.com/feeds",
+             "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(sa, scope)
+    return gspread.authorize(creds)
 
-client, client_err = get_client()
-connected = client is not None
-if not connected:
-    st.error(client_err or "Chưa cấu hình Service Account")
+client = get_client()
 
+# =========================
 # Sheet helpers
+# =========================
 def open_ws(spreadsheet_id, sheet_name):
     sh = client.open_by_key(spreadsheet_id)
     try:
@@ -108,63 +120,59 @@ with st.sidebar:
     pw_input  = st.text_input("Mật khẩu", type="password")
 
     if st.button("Đăng nhập", use_container_width=True):
-        try:
-            ws = open_ws(spreadsheet_id, "Users")
-            ensure_headers(ws, ["USE","Tài khoản (USE\\username)","Họ tên","Email",
-                                "Mật khẩu_băm","Vai trò","Kích hoạt"])
-            df = ws_to_df(ws)
-            row = df[df["Tài khoản (USE\\username)"].astype(str)==acc_input]
-            if row.empty: st.error("Không tìm thấy tài khoản")
-            else:
-                r=row.iloc[0]
-                if str(r.get("Kích hoạt","1"))=="0": st.error("Chưa kích hoạt")
-                elif verify_pw(pw_input, r.get("Mật khẩu_băm","")):
-                    st.session_state.update({"is_auth":True,
-                                             "auth_acc":acc_input,
-                                             "auth_use":str(r.get("USE","")),
-                                             "role":r.get("Vai trò","user")})
-                    st.success("Đăng nhập thành công")
-                else: st.error("Sai mật khẩu")
-        except Exception as e: st.error(f"Lỗi: {e}")
+        ws = open_ws(spreadsheet_id, "Users")
+        ensure_headers(ws, ["USE","Tài khoản (USE\\username)","Họ tên","Email",
+                            "Mật khẩu_băm","Vai trò","Kích hoạt"])
+        df = ws_to_df(ws)
+        row = df[df["Tài khoản (USE\\username)"].astype(str)==acc_input]
+        if row.empty: st.error("Không tìm thấy tài khoản")
+        else:
+            r=row.iloc[0]
+            if str(r.get("Kích hoạt","1"))=="0": st.error("Chưa kích hoạt")
+            elif verify_pw(pw_input, r.get("Mật khẩu_băm","")):
+                st.session_state.update({"is_auth":True,
+                                         "auth_acc":acc_input,
+                                         "auth_use":str(r.get("USE","")),
+                                         "role":r.get("Vai trò","user")})
+                st.success("Đăng nhập thành công")
+            else: st.error("Sai mật khẩu")
 
     if st.button("Đăng xuất", use_container_width=True):
         st.session_state.clear(); st.experimental_rerun()
 
     with st.expander("🧩 Đồng bộ Users từ sheet USE"):
         if st.button("Đồng bộ ngay"):
-            try:
-                ws_src = open_ws(spreadsheet_id,"USE")
-                df_src = ws_to_df(ws_src)
-                need = {"Tên đơn vị","USE (mã đăng nhập)","Mật khẩu mặc định"}
-                if not need.issubset(df_src.columns): st.error("Sheet USE thiếu cột")
-                else:
-                    ws_u = open_ws(spreadsheet_id,"Users")
-                    ensure_headers(ws_u,["USE","Tài khoản (USE\\username)","Họ tên","Email",
-                                         "Mật khẩu_băm","Vai trò","Kích hoạt"])
-                    df_u = ws_to_df(ws_u)
-                    if df_u.empty: df_u=pd.DataFrame(columns=["USE","Tài khoản (USE\\username)",
-                                                              "Họ tên","Email","Mật khẩu_băm",
-                                                              "Vai trò","Kích hoạt"])
-                    add=[]
-                    for _,r in df_src.iterrows():
-                        unit=str(r.get("Tên đơn vị",""))
-                        acc=str(r.get("USE (mã đăng nhập)","")).strip()
-                        pw=str(r.get("Mật khẩu mặc định","123456"))
-                        if not acc: continue
-                        role="admin" if unit.lower()=="admin" else "user"
-                        if (df_u["Tài khoản (USE\\username)"].astype(str)==acc).any():
-                            df_u.loc[df_u["Tài khoản (USE\\username)"].astype(str)==acc,
-                                     ["USE","Mật khẩu_băm","Vai trò","Kích hoạt"]]=[
-                                         acc.split("\\")[0],hash_pw(pw),role,"1"]
-                        else:
-                            add.append({"USE":acc.split("\\")[0],
-                                        "Tài khoản (USE\\username)":acc,
-                                        "Họ tên":"","Email":"",
-                                        "Mật khẩu_băm":hash_pw(pw),
-                                        "Vai trò":role,"Kích hoạt":"1"})
-                    if add: df_u=pd.concat([df_u,pd.DataFrame(add)],ignore_index=True)
-                    df_to_ws(ws_u,df_u); st.success(f"Đồng bộ xong {len(df_u)} tài khoản")
-            except Exception as e: st.error(f"Lỗi: {e}")
+            ws_src = open_ws(spreadsheet_id,"USE")
+            df_src = ws_to_df(ws_src)
+            need = {"Tên đơn vị","USE (mã đăng nhập)","Mật khẩu mặc định"}
+            if not need.issubset(df_src.columns): st.error("Sheet USE thiếu cột")
+            else:
+                ws_u = open_ws(spreadsheet_id,"Users")
+                ensure_headers(ws_u,["USE","Tài khoản (USE\\username)","Họ tên","Email",
+                                     "Mật khẩu_băm","Vai trò","Kích hoạt"])
+                df_u = ws_to_df(ws_u)
+                if df_u.empty:
+                    df_u=pd.DataFrame(columns=["USE","Tài khoản (USE\\username)","Họ tên",
+                                               "Email","Mật khẩu_băm","Vai trò","Kích hoạt"])
+                add=[]
+                for _,r in df_src.iterrows():
+                    unit=str(r.get("Tên đơn vị",""))
+                    acc=str(r.get("USE (mã đăng nhập)","")).strip()
+                    pw=str(r.get("Mật khẩu mặc định","123456"))
+                    if not acc: continue
+                    role="admin" if unit.lower()=="admin" else "user"
+                    if (df_u["Tài khoản (USE\\username)"].astype(str)==acc).any():
+                        df_u.loc[df_u["Tài khoản (USE\\username)"].astype(str)==acc,
+                                 ["USE","Mật khẩu_băm","Vai trò","Kích hoạt"]]=[
+                                     acc.split("\\")[0],hash_pw(pw),role,"1"]
+                    else:
+                        add.append({"USE":acc.split("\\")[0],
+                                    "Tài khoản (USE\\username)":acc,
+                                    "Họ tên":"","Email":"",
+                                    "Mật khẩu_băm":hash_pw(pw),
+                                    "Vai trò":role,"Kích hoạt":"1"})
+                if add: df_u=pd.concat([df_u,pd.DataFrame(add)],ignore_index=True)
+                df_to_ws(ws_u,df_u); st.success(f"Đồng bộ xong {len(df_u)} tài khoản")
 
 # =========================
 # Stop nếu chưa login
