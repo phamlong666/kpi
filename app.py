@@ -373,6 +373,7 @@ df_display.insert(0, "Chọn", chons)
 
 # Cấu hình cột: chỉ cho phép tick "Chọn", các cột còn lại khóa lại
 colcfg = {
+    # FIX: Bỏ disabled=True khỏi cột "Chọn" để cho phép tương tác
     "Chọn": st.column_config.CheckboxColumn(help="Đánh dấu 1 dòng để nạp lên Form"),
     "Tên chỉ tiêu (KPI)": st.column_config.TextColumn(disabled=True),
     "Đơn vị tính": st.column_config.TextColumn(disabled=True),
