@@ -222,6 +222,8 @@ def get_gspread_client_if_possible():
     try:
         from oauth2client.service_account import ServiceAccountCredentials
         import gspread
+
+
     except Exception as e:
         return None, f"Thiếu thư viện gspread/oauth2client: {e}"
     try:
