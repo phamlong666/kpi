@@ -269,7 +269,7 @@ st.markdown("---")
 st.markdown('<h2 class="section-title">3) Nhập thủ công KPI & Xuất Excel (9 cột)</h2>', unsafe_allow_html=True)
 
 # ---- 3.a) UPLOAD CSV → ĐỔ VÀO BẢNG TẠM ----
-with st.expander(⬆️ Nạp CSV vào 'Bảng tạm'", expanded=False):
+with st.expander("Nạp CSV vào 'Bảng tạm'", expanded=False):
     up_csv = st.file_uploader(
         "Tải file .csv (các cột gợi ý: 'Tên chỉ tiêu (KPI)', 'Đơn vị tính', 'Kế hoạch (tháng)', 'Trọng số', 'Bộ phận/người phụ trách', 'Tháng', 'Năm', 'Thực hiện (tháng)')",
         type=["csv"],
