@@ -355,7 +355,8 @@ st.markdown("**Bảng tạm (tick cột *Chọn* rồi nhấn ▶ Nạp dòng đ
 # Xử lý trường hợp DataFrame rỗng
 if st.session_state.temp_kpi_df.empty:
     st.info("Bảng tạm chưa có dữ liệu.")
-    edited_temp = pd.DataFrame()
+    # Tạo DataFrame rỗng để tránh lỗi khi các nút được nhấn
+    edited_temp = pd.DataFrame(columns=["Chọn"] + EXPECTED_KPI_COLS)
 else:
     # Cấu hình cột: chỉ cho phép tick "Chọn", các cột còn lại khóa lại
     colcfg = {
@@ -374,7 +375,7 @@ else:
         "Điểm KPI": st.column_config.NumberColumn(format="%.4f", disabled=True),
     }
 
-    # Hiển thị data_editor và lưu kết quả vào session state
+    # Hiển thị data_editor và lưu kết quả vào một biến tạm
     edited_temp = st.data_editor(
         st.session_state.temp_kpi_df,
         key="temp_table_editor",
@@ -383,14 +384,15 @@ else:
         column_config=colcfg,
         num_rows="fixed",
     )
-    # Ghi đè DataFrame trong session state bằng kết quả đã chỉnh sửa
+    # Cập nhật DataFrame trong session state với kết quả đã chỉnh sửa
     st.session_state.temp_kpi_df = edited_temp.copy()
 
 
 colSel1, colSel2, colSel3 = st.columns([1,1,2])
 with colSel1:
-    if st.button("▶ Nạp dòng đã chọn lên Form"):
-        selected_rows = st.session_state.temp_kpi_df[st.session_state.temp_kpi_df["Chọn"] == True]
+    if st.button("▶ Nạp dòng đã chọn lên Form", key="load_button"):
+        # Sử dụng edited_temp đã được cập nhật thay vì đọc lại từ session_state
+        selected_rows = edited_temp[edited_temp["Chọn"] == True]
         if selected_rows.empty:
             st.warning("Chưa chọn dòng nào (tick vào cột 'Chọn').")
         else:
@@ -407,18 +409,20 @@ with colSel1:
             st.session_state['nam'] = int(_safe_number(r["Năm"], datetime.now().year))
             st.success("Đã nạp dòng đã chọn lên Form. Anh chỉnh 'Thực hiện' để ra điểm KPI.")
 with colSel2:
-    if st.button("🗑️ Xóa dòng tick chọn"):
-        if st.session_state.temp_kpi_df.empty:
+    if st.button("🗑️ Xóa dòng tick chọn", key="delete_button"):
+        if edited_temp.empty:
             st.info("Bảng tạm chưa có dữ liệu.")
         else:
-            selected_rows_count = len(st.session_state.temp_kpi_df[st.session_state.temp_kpi_df["Chọn"] == True])
+            # Sử dụng edited_temp đã được cập nhật
+            rows_to_keep = edited_temp[edited_temp["Chọn"] == False]
+            selected_rows_count = len(edited_temp) - len(rows_to_keep)
             if selected_rows_count == 0:
                 st.info("Chưa tick chọn dòng nào.")
             else:
-                st.session_state.temp_kpi_df = st.session_state.temp_kpi_df[st.session_state.temp_kpi_df["Chọn"] == False].reset_index(drop=True)
+                st.session_state.temp_kpi_df = rows_to_keep.reset_index(drop=True)
                 st.success(f"Đã xóa {selected_rows_count} dòng khỏi Bảng tạm.")
 with colSel3:
-    if st.button("💾 Xuất Excel (Bảng tạm)"):
+    if st.button("💾 Xuất Excel (Bảng tạm)", key="export_button"):
         if st.session_state.temp_kpi_df.empty:
             st.error("Chưa có dữ liệu để xuất.")
         else:
