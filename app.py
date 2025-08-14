@@ -1,620 +1,536 @@
 # -*- coding: utf-8 -*-
+# =============================================================
+#  app.py – KPI One-File (Streamlit)
+#  - Nhập liệu KPI từ CSV/Excel hoặc nhập tay
+#  - Lưu theo USE/Đơn vị/Tháng/Năm lên Google Sheets (KPI_DB)
+#  - Báo cáo: tháng hiện tại, so tháng trước, so cùng kỳ
+#  - USE Admin: xếp hạng đơn vị + cấp mật khẩu tạm (ghi Users/ResetRequests)
+#  Lưu ý: Cấu hình secrets.toml phải có khối [gdrive_service_account]
+# =============================================================
+
 import streamlit as st
 import pandas as pd
 from datetime import datetime
 from io import BytesIO
-import base64
-import os
-import unicodedata
+import json
+import uuid
+import hashlib
+from typing import List
+
+# Google Sheets / Drive
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+# =========================
+# 1) Page config & CSS
+# =========================
+st.set_page_config(page_title="KPI – EVN USE Center", layout="wide")
+
+CUSTOM_CSS = """
+<style>
+:root { --mn-blue: #2457F5; }
+.block-container { padding-top: 1rem; }
+h1,h2,h3 { letter-spacing: .2px; }
+.section-title { font-size: 22px; margin: 8px 0 12px 0; }
+.stButton>button { border-radius: 12px; padding: .5rem 1rem; }
+.dataframe tbody tr:hover {background: #f9fbff}
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+st.title("KPI – Trung tâm điều hành số (bản một file)")
 
 # =============================
-# CẤU HÌNH TRANG
+# 2) Secrets & Google Sheets auth
 # =============================
-st.set_page_config(
-    page_title="KPI Scorer – Định Hóa (Full Suite)",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# =============================
-# HẰNG SỐ & HÀM DÙNG CHUNG
-# =============================
-EXPECTED_KPI_COLS = [
-    "Tên chỉ tiêu (KPI)",          # 1
-    "Đơn vị tính",                 # 2
-    "Kế hoạch",                    # 3
-    "Thực hiện",                   # 4
-    "Trọng số",                    # 5
-    "Bộ phận/người phụ trách",     # 6
-    "Tháng",                       # 7
-    "Năm",                         # 8
-    "Điểm KPI",                    # 9 = (Thực hiện/Kế hoạch)×Trọng số (trừ KPI dự báo)
-]
-
-
-def _safe_number(x, default=0.0):
-    try:
-        if x is None or x == "":
-            return float(default)
-        return float(x)
-    except Exception:
-        return float(default)
-
-
-# --- CÔNG THỨC CHUNG ---
-
-def compute_kpi_score(thuc_hien, ke_hoach, trong_so):
-    ke_hoach = _safe_number(ke_hoach, 0.0)
-    thuc_hien = _safe_number(thuc_hien, 0.0)
-    trong_so = _safe_number(trong_so, 0.0)
-    if ke_hoach == 0:
-        return 0.0
-    return round((thuc_hien / ke_hoach) * trong_so, 4)
-
-
-# --- KPI DỰ BÁO TỔNG THƯƠNG PHẨM (±1.5%; vượt 0.1% trừ 0.04; trần 3đ) ---
-
-def _kpi_sai_so_du_bao_diem(sai_so_percent, trong_so):
-    sai_so = abs(_safe_number(sai_so_percent, 0.0))
-    ts = min(_safe_number(trong_so, 0.0), 3.0)  # trần 3 điểm
-    if sai_so <= 1.5:
-        return ts
-    vuot = sai_so - 1.5
-    tru = (vuot / 0.1) * 0.04
-    tru = min(tru, 3.0)
-    return max(round(ts - tru, 4), 0.0)
-
-
-def _is_du_bao_tong_thuong_pham(ten_chi_tieu: str) -> bool:
-    if not ten_chi_tieu:
-        return False
-    s = ten_chi_tieu.strip().lower()
-    return "dự báo tổng thương phẩm" in s
-
-
-def compute_kpi_score_dynamic(ten_chi_tieu, thuc_hien, ke_hoach, trong_so):
-    # Nếu là KPI dự báo → thuc_hien coi là sai số (%) theo tháng
-    if _is_du_bao_tong_thuong_pham(ten_chi_tieu):
-        return _kpi_sai_so_du_bao_diem(thuc_hien, trong_so)
-    return compute_kpi_score(thuc_hien, ke_hoach, trong_so)
-
-
-def export_dataframe_to_excel(df: pd.DataFrame) -> bytes:
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="KPI")
-        workbook = writer.book
-        worksheet = writer.sheets["KPI"]
-        fmt = workbook.add_format({"text_wrap": True, "valign": "vcenter"})
-        worksheet.set_column(0, len(df.columns)-1, 22, fmt)
-    buffer.seek(0)
-    return buffer.read()
-
-
-# =============================
-# LOGO TRÒN (đa nguồn + mặc định GitHub của anh Long)
-# =============================
-
-def _detect_logo_bytes():
-    """Ưu tiên:
-    1) secrets['ui']['logo_url'] hoặc secrets['logo_url']
-    2) /mnt/data/logo.png
-    3) ./assets/logo.png hoặc ./.streamlit/logo.png
-    4) ENV LOGO_URL
-    5) DEFAULT_LOGO_URL (GitHub của anh Long)
-    """
-    DEFAULT_LOGO_URL = "https://raw.githubusercontent.com/phamlong666/kpi/main/logo_hinh_tron.png"
-    try:
-        ui = st.secrets.get("ui", {})
-        logo_url = ui.get("logo_url") or st.secrets.get("logo_url")
-        if logo_url:
-            return f'<img class="floating-logo" src="{logo_url}" />', "secrets.logo_url"
-    except Exception:
-        pass
-    for p in ["/mnt/data/logo.png", "./assets/logo.png", "./.streamlit/logo.png"]:
-        if os.path.exists(p):
-            try:
-                with open(p, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode()
-                return f'<img class="floating-logo" src="data:image/png;base64,{b64}" />', p
-            except Exception:
-                pass
-    env_logo = os.getenv("LOGO_URL")
-    if env_logo:
-        return f'<img class="floating-logo" src="{env_logo}" />', "env.LOGO_URL"
-    if DEFAULT_LOGO_URL:
-        return f'<img class="floating-logo" src="{DEFAULT_LOGO_URL}" />', "DEFAULT_LOGO_URL"
-    return '<div class="floating-logo">⚡</div>', "fallback"
-
-
-def _inject_ui_enhancements():
-    logo_tag, _ = _detect_logo_bytes()
-    css = """
-    <style>
-    .title-card{padding:14px 18px;border:1px solid #ececec;border-radius:12px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.04)}
-    .title-card h1{margin:0;font-size:28px;line-height:1.25;font-weight:800;color:#0B5ED7;display:flex;align-items:center;gap:10px}
-    .title-card .title-icon{font-size:26px;background:#0B5ED7;color:#fff;width:36px;height:36px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(11,94,215,.35)}
-    .title-card .subtitle{margin:6px 0 0 0;color:#444}
-    .section-title{font-size:24px;font-weight:800;margin:6px 0 12px 0;color:#222}
-    [data-testid="stDataFrame"] *,[data-testid="stDataEditor"] *,[data-testid="stDataEditorGrid"] *{font-size:20px !important}
-    html, body, [data-testid="stAppViewContainer"] *{font-size:20px}
-    .stTextInput>div>div>input,.stNumberInput input{font-size:19px !important}
-    .stButton>button{font-size:18px !important}
-    .floating-logo{position:fixed;right:16px;top:86px;width:76px;height:76px;border-radius:50%;box-shadow:0 6px 16px rgba(0,0,0,0.15);z-index:99999;background:#ffffffee;backdrop-filter:blur(4px);display:inline-block;object-fit:cover;text-align:center;line-height:76px;font-size:38px;animation:pop .6s ease-out;pointer-events:none}
-    @keyframes pop{0%{transform:scale(.6);opacity:.2}100%{transform:scale(1);opacity:1}}
-    </style>
-    """
-    st.markdown(css, unsafe_allow_html=True)
-    st.markdown(logo_tag, unsafe_allow_html=True)
-
-
-# =============================
-# GOOGLE SHEETS (tùy chọn) & SESSION STATE
-# =============================
-
-def read_service_account_from_secrets():
-    try:
-        conf = st.secrets["google_service_account"]
-    except Exception:
-        try:
-            conf = st.secrets["gdrive_service_account"]
-        except Exception as e:
-            raise RuntimeError("Không tìm thấy google_service_account hoặc gdrive_service_account trong secrets.") from e
-    conf = dict(conf)
-    if "private_key" in conf and conf["private_key"]:
-        # FIX: thay '\n' bằng xuống dòng thật (handle cả dạng đã bị escape)
-        pk = str(conf["private_key"])
-        conf["private_key"] = pk.replace("\\n", "\n")
-        return conf
-    if "private_key_b64" in conf and conf["private_key_b64"]:
-        import base64
-        decoded = base64.b64decode(conf["private_key_b64"]).decode("utf-8")
-        conf["private_key"] = decoded.replace("\\n", "\n")
-        return conf
-    raise RuntimeError("Secrets thiếu private_key hoặc private_key_b64.")
-
-
+@st.cache_resource(show_spinner=False)
 def get_gspread_client_if_possible():
     try:
-        from oauth2client.service_account import ServiceAccountCredentials
-        import gspread
-    except Exception as e:
-        return None, f"Thiếu thư viện gspread/oauth2client: {e}"
+        s = st.secrets["gdrive_service_account"]
+    except Exception:
+        return None, "❌ Không tìm thấy 'gdrive_service_account' trong secrets."
     try:
-        sa = read_service_account_from_secrets()
+        sa_dict = dict(s)
+        # Streamlit secrets cần chuyển \n về \n thực
+        if "private_key" in sa_dict:
+            sa_dict["private_key"] = sa_dict["private_key"].replace("\\n", "\n")
         scope = [
             "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/drive.file",
+            "https://www.googleapis.com/auth/drive"
         ]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(sa, scope)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_dict, scope)
         client = gspread.authorize(creds)
-        return client, "Đã sẵn sàng kết nối Google Sheets."
+        return client, None
     except Exception as e:
-        return None, str(e)
+        return None, f"❌ Lỗi khi khởi tạo Google Client: {e}"
+
+client, client_err = get_gspread_client_if_possible()
+connected = client is not None
+if not connected:
+    st.info(client_err or "Chưa cấu hình Google Service Account.")
+
+# Spreadsheet ID & email quản trị để hiển thị (không gửi mail)
+with st.sidebar:
+    st.subheader("🔗 Kết nối dữ liệu")
+    spreadsheet_id = st.text_input("Spreadsheet ID (Google Sheets)", value=st.session_state.get("spreadsheet_id", ""))
+    st.session_state["spreadsheet_id"] = spreadsheet_id
+    email_nhan_bao_cao = st.text_input("Email quản trị / nhận báo cáo", value=st.session_state.get("email_admin", "phamlong666@gmail.com"))
+    st.session_state["email_admin"] = email_nhan_bao_cao
+
+# =============================
+# 3) Tiện ích Sheets: mở/đảm bảo header/DF <-> sheet
+# =============================
+
+def _open_sheet(client, spreadsheet_id: str, sheet_name: str):
+    sh = client.open_by_key(spreadsheet_id)
+    try:
+        ws = sh.worksheet(sheet_name)
+    except Exception:
+        ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=50)
+    return ws
 
 
-def init_session_state():
-    # Bảng tạm cho luồng CSV + form
-    st.session_state.setdefault("kpi_rows", [])
-    # State form thủ công
-    defaults = {
-        'ten_kpi':'', 'dvt':'', 'ke_hoach':0.0, 'thuc_hien':0.0, 'trong_so':0.0,
-        'bo_phan':'Tổ Kinh doanh tổng hợp', 'thang':datetime.now().month, 'nam':datetime.now().year
-    }
-    for k, v in defaults.items():
-        st.session_state.setdefault(k, v)
-    # Google flags
-    st.session_state.setdefault("connected", False)
-    st.session_state.setdefault("connect_msg", "")
-    # ✅ LƯU TRẠNG THÁI BẢNG TẠM VỚI DF
-    # Nếu DataFrame chưa tồn tại, tạo mới. Nếu đã tồn tại, dùng lại.
-    if "temp_kpi_df" not in st.session_state:
-        st.session_state.temp_kpi_df = pd.DataFrame(columns=["Chọn"] + EXPECTED_KPI_COLS)
+def _ensure_headers(ws, headers: List[str]):
+    try:
+        cur = ws.row_values(1)
+    except Exception:
+        cur = []
+    if cur != headers:
+        ws.clear()
+        ws.append_row(headers, value_input_option="RAW")
+
+
+def _ws_to_df(ws) -> pd.DataFrame:
+    rows = ws.get_all_values()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows[1:], columns=rows[0])
+
+
+def _df_to_ws(ws, df: pd.DataFrame):
+    ws.clear()
+    ws.append_row(list(df.columns), value_input_option="RAW")
+    if not df.empty:
+        ws.append_rows(df.astype(str).values.tolist(), value_input_option="RAW")
 
 
 # =============================
-# SIDEBAR & HEADER
+# 4) Sidebar – USE / Đơn vị / Kỳ làm việc
 # =============================
-init_session_state()
+use_id = ""
+don_vi = ""
+month_work = datetime.now().month
+year_work = datetime.now().year
 
 with st.sidebar:
-    st.header("🔗 Kết nối")
-    spreadsheet_id = st.text_input(
-        "Spreadsheet ID",
-        help=(
-            "Dán ID của Google Sheets. Ví dụ từ URL:\n"
-            "https://docs.google.com/spreadsheets/d/1AbCdEfGh.../edit#gid=0\n"
-            "=> Spreadsheet ID là phần giữa /d/ và /edit"
-        ),
-    )
-    nhom_cham = st.selectbox("Nhóm chấm", [1,2,3,4,5], index=1)
-    email_nhan_bao_cao = st.text_input("Email nhận báo cáo", "phamlong666@gmail.com")
-
-    st.markdown("---")
-    st.caption("Mắt Nâu vẫn cho phép **nhập KPI thủ công** kể cả khi chưa kết nối Google.")
-
-connected = False
-connect_msg = ""
-if spreadsheet_id:
-    client, msg = get_gspread_client_if_possible()
-    if client is None:
-        connect_msg = f"Không kết nối được Google Sheets: {msg}"
-        st.warning(connect_msg)
-    else:
-        connected = True
-        connect_msg = "Kết nối Google Sheets sẵn sàng."
-        st.success(connect_msg)
-
-st.session_state.connected = connected
-st.session_state.connect_msg = connect_msg
-
-_inject_ui_enhancements()
-st.markdown(
-    """
-<div class="title-card">
-  <h1><span class="title-icon">⚡</span><span class="title-text">KPI Đội quản lý Điện lực khu vực Định Hóa</span></h1>
-  <p class="subtitle">Luồng chuẩn: Upload CSV → thêm vào Bảng tạm → chọn dòng → tự nạp lên Form nhập → tính điểm ngay.</p>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# =============================
-# 3) NHẬP THỦ CÔNG KPI & XUẤT EXCEL (9 CỘT)
-#    + NẠP CSV VÀO BẢNG TẠM & CHỌN DÒNG ĐỂ NẠP LÊN FORM
-# =============================
-st.markdown("---")
-st.markdown('<h2 class="section-title">3) Nhập thủ công KPI & Xuất Excel (9 cột)</h2>', unsafe_allow_html=True)
-
-# ---- 3.a) UPLOAD CSV → ĐỔ VÀO BẢNG TẠM ----
-with st.expander("Nạp CSV vào 'Bảng tạm'", expanded=False):
-    up_csv = st.file_uploader(
-        "Tải file .csv (các cột gợi ý: 'Tên chỉ tiêu (KPI)', 'Đơn vị tính', 'Kế hoạch (tháng)', 'Trọng số', 'Bộ phận/người phụ trách', 'Tháng', 'Năm', 'Thực hiện (tháng)')",
-        type=["csv"],
-        key="csv_to_temp",
-    )
-    if up_csv is not None:
+    st.subheader("🏷 USE & Kỳ làm việc")
+    if connected and spreadsheet_id:
         try:
-            df_csv = pd.read_csv(up_csv)
-            # Ánh xạ linh hoạt → 9 cột chuẩn của bảng tạm
-            def _map_row(r):
-                name = r.get('Tên chỉ tiêu (KPI)', r.get('Ten KPI', ''))
-                dvt = r.get('Đơn vị tính', r.get('Don vi tinh', ''))
-                plan = r.get('Kế hoạch (tháng)', r.get('Kế hoạch', r.get('Ke hoach', 0)))
-                actual = r.get('Thực hiện (tháng)', r.get('Thực hiện', r.get('Thuc hien', 0)))
-                weight = r.get('Trọng số', r.get('Trong so', 0))
-                dept = r.get('Bộ phận/người phụ trách', r.get('Bo phan', ''))
-                month = r.get('Tháng', datetime.now().month)
-                year = r.get('Năm', datetime.now().year)
-                score = compute_kpi_score_dynamic(name, actual, plan, weight)
-                return {
-                    "Tên chỉ tiêu (KPI)": str(name or "").strip(),
-                    "Đơn vị tính": str(dvt or "").strip(),
-                    "Kế hoạch": _safe_number(plan, 0),
-                    "Thực hiện": _safe_number(actual, 0),
-                    "Trọng số": _safe_number(weight, 0),
-                    "Bộ phận/người phụ trách": str(dept or "").strip(),
-                    "Tháng": int(_safe_number(month, datetime.now().month)),
-                    "Năm": int(_safe_number(year, datetime.now().year)),
-                    "Điểm KPI": score,
-                }
-            added_rows = [_map_row(r) for _, r in df_csv.fillna("").iterrows()]
-            added_df = pd.DataFrame(added_rows, columns=EXPECTED_KPI_COLS)
-            added_df.insert(0, "Chọn", False)
-            st.session_state.temp_kpi_df = pd.concat([st.session_state.temp_kpi_df, added_df], ignore_index=True)
-            st.success(f"Đã thêm {len(added_df)} dòng vào Bảng tạm.")
+            ws_meta = _open_sheet(client, spreadsheet_id, "Meta_Units")
+            meta_cols = ["USE", "Đơn vị", "Email quản trị"]
+            _ensure_headers(ws_meta, meta_cols)
+            df_meta = _ws_to_df(ws_meta)
+            use_list = sorted(df_meta["USE"].dropna().unique().tolist()) if not df_meta.empty else []
         except Exception as e:
-            st.error(f"Không đọc được CSV: {e}")
+            df_meta = pd.DataFrame()
+            use_list = []
+            st.warning(f"Không tải được Meta_Units: {e}")
+    else:
+        df_meta = pd.DataFrame(); use_list = []
 
-# ---- 3.b) FORM THỦ CÔNG (gắn với session_state để nạp từ bảng tạm) ----
-with st.form("kpi_input_form", clear_on_submit=False):
-    c1, c2, c3 = st.columns([1.2, 1.2, 1])
-    with c1:
-        st.text_input("1) Tên chỉ tiêu (KPI)", key='ten_kpi')
-        st.text_input("2) Đơn vị tính", key='dvt')
-        st.number_input("3) Kế hoạch", min_value=0.0, step=0.1, format="%.4f", key='ke_hoach')
-    with c2:
-        st.number_input("4) Thực hiện", min_value=0.0, step=0.1, format="%.4f", key='thuc_hien')
-        st.number_input("5) Trọng số", min_value=0.0, step=0.1, format="%.4f", key='trong_so')
-    bo_phan_list = [
-        "Tổ Kế hoạch kỹ thuật",
-        "Tổ Kinh doanh tổng hợp",
-        "Tổ Quản lý tổng hợp 1",
-        "Tổ Quản lý tổng hợp 2",
-        "Tổ Trực vận hành",
-        "Tổ Kiểm tra giám sát mua bán điện",
-    ]
-    st.selectbox("6) Bộ phận/người phụ trách", bo_phan_list, index=bo_phan_list.index(st.session_state.get('bo_phan', bo_phan_list[1])) if st.session_state.get('bo_phan', None) in bo_phan_list else 1, key='bo_phan')
-    with c3:
-        st.selectbox("7) Tháng", list(range(1,13)), index=(st.session_state.get('thang', datetime.now().month)-1), key='thang')
-        st.number_input("8) Năm", min_value=2000, max_value=2100, value=st.session_state.get('nam', datetime.now().year), step=1, key='nam')
-        st.metric("9) Điểm KPI (xem trước)", compute_kpi_score_dynamic(st.session_state['ten_kpi'], st.session_state['thuc_hien'], st.session_state['ke_hoach'], st.session_state['trong_so']))
+    if use_list:
+        use_id = st.selectbox("USE", use_list, index=0)
+        don_vi_list = sorted(df_meta[df_meta["USE"] == use_id]["Đơn vị"].dropna().unique().tolist()) if not df_meta.empty else []
+        don_vi = st.selectbox("Đơn vị", don_vi_list, index=0 if don_vi_list else None) if don_vi_list else st.text_input("Đơn vị", value="Đơn vị A")
+    else:
+        use_id = st.text_input("USE (vd: DH01)")
+        don_vi = st.text_input("Đơn vị", value="Đơn vị A")
 
-    if st.form_submit_button("➕ Thêm vào bảng tạm"):
-        new_row_data = {
-            "Chọn": False,
-            "Tên chỉ tiêu (KPI)": st.session_state['ten_kpi'].strip(),
-            "Đơn vị tính": st.session_state['dvt'].strip(),
-            "Kế hoạch": _safe_number(st.session_state['ke_hoach'], 0.0),
-            "Thực hiện": _safe_number(st.session_state['thuc_hien'], 0.0),
-            "Trọng số": _safe_number(st.session_state['trong_so'], 0.0),
-            "Bộ phận/người phụ trách": st.session_state['bo_phan'].strip(),
-            "Tháng": int(st.session_state['thang']),
-            "Năm": int(st.session_state['nam']),
-            "Điểm KPI": compute_kpi_score_dynamic(st.session_state['ten_kpi'], st.session_state['thuc_hien'], st.session_state['ke_hoach'], st.session_state['trong_so']),
-        }
-        new_row_df = pd.DataFrame([new_row_data], columns=["Chọn"] + EXPECTED_KPI_COLS)
-        st.session_state.temp_kpi_df = pd.concat([st.session_state.temp_kpi_df, new_row_df], ignore_index=True)
-        st.success("Đã thêm 1 dòng KPI vào bảng tạm.")
-
-# ---- 3.c) BẢNG TẠM: CHỌN DÒNG → NẠP LÊN FORM & XUẤT EXCEL ----
-st.markdown("**Bảng tạm (tick cột *Chọn* rồi nhấn ▶ Nạp dòng đã chọn lên Form):**")
-
-# Xử lý trường hợp DataFrame rỗng
-if st.session_state.temp_kpi_df.empty:
-    st.info("Bảng tạm chưa có dữ liệu.")
-else:
-
-    # ✅ Ép kiểu cột 'Chọn' về bool để checkbox tick được trong Data Editor
-    if "Chọn" not in st.session_state.temp_kpi_df.columns:
-        st.session_state.temp_kpi_df.insert(0, "Chọn", False)
-    def __mn_to_bool(v):
-        if isinstance(v, bool):
-            return v
-        if v is None:
-            return False
-        if isinstance(v, (int, float)):
-            try:
-                return bool(int(v))
-            except Exception:
-                return False
-        if isinstance(v, str):
-            t = v.strip().lower()
-            return t in ("true","1","x","yes","y","checked")
-        return False
-    st.session_state.temp_kpi_df["Chọn"] = st.session_state.temp_kpi_df["Chọn"].map(__mn_to_bool).fillna(False)
-    # Cấu hình cột: chỉ cho phép tick "Chọn", các cột còn lại khóa lại
-    colcfg = {
-        "Chọn": st.column_config.CheckboxColumn(
-            "Chọn",
-            help="Đánh dấu một dòng để nạp lên Form",
-        ),
-        "Tên chỉ tiêu (KPI)": st.column_config.TextColumn(disabled=True),
-        "Đơn vị tính": st.column_config.TextColumn(disabled=True),
-        "Kế hoạch": st.column_config.NumberColumn(disabled=True),
-        "Thực hiện": st.column_config.NumberColumn(disabled=True),
-        "Trọng số": st.column_config.NumberColumn(disabled=True),
-        "Bộ phận/người phụ trách": st.column_config.TextColumn(disabled=True),
-        "Tháng": st.column_config.NumberColumn(disabled=True),
-        "Năm": st.column_config.NumberColumn(disabled=True),
-        "Điểm KPI": st.column_config.NumberColumn(format="%.4f", disabled=True),
-    }
-
-    # Bắt đầu xử lý với cơ chế cập nhật trạng thái mới.
-    # Lấy DataFrame từ session state
-    df_to_edit = st.session_state.temp_kpi_df
-    
-    # Hiển thị data editor và gán lại cho session state
-    st.session_state.temp_kpi_df = st.data_editor(
-        df_to_edit,
-        key="temp_table_editor",
-        use_container_width=True,
-        hide_index=True,
-        column_config=colcfg,
-        num_rows="fixed",
-    )
-
-
-colSel1, colSel2, colSel3 = st.columns([1,1,2])
-with colSel1:
-    if st.button("▶ Nạp dòng đã chọn lên Form", key="load_button"):
-        # Lấy dòng đã chọn từ session state đã được cập nhật
-        selected_rows = st.session_state.temp_kpi_df[st.session_state.temp_kpi_df["Chọn"] == True]
-        if selected_rows.empty:
-            st.warning("Chưa chọn dòng nào (tick vào cột 'Chọn').")
-        else:
-            # Ưu tiên dòng cuối cùng vừa tick
-            r = selected_rows.iloc[-1]
-            # Gán lên form
-            st.session_state['ten_kpi'] = str(r["Tên chỉ tiêu (KPI)"])
-            st.session_state['dvt'] = str(r["Đơn vị tính"]) or ""
-            st.session_state['ke_hoach'] = float(_safe_number(r["Kế hoạch"], 0))
-            st.session_state['thuc_hien'] = float(_safe_number(r["Thực hiện"], 0))
-            st.session_state['trong_so'] = float(_safe_number(r["Trọng số"], 0))
-            st.session_state['bo_phan'] = str(r["Bộ phận/người phụ trách"]) or "Tổ Kinh doanh tổng hợp"
-            st.session_state['thang'] = int(_safe_number(r["Tháng"], datetime.now().month))
-            st.session_state['nam'] = int(_safe_number(r["Năm"], datetime.now().year))
-            st.success("Đã nạp dòng đã chọn lên Form. Anh chỉnh 'Thực hiện' để ra điểm KPI.")
-with colSel2:
-    if st.button("🗑️ Xóa dòng tick chọn", key="delete_button"):
-        if st.session_state.temp_kpi_df.empty:
-            st.info("Bảng tạm chưa có dữ liệu.")
-        else:
-            # Lấy các dòng không được chọn từ session state đã được cập nhật
-            rows_to_keep = st.session_state.temp_kpi_df[st.session_state.temp_kpi_df["Chọn"] == False]
-            selected_rows_count = len(st.session_state.temp_kpi_df) - len(rows_to_keep)
-            if selected_rows_count == 0:
-                st.info("Chưa tick chọn dòng nào.")
-            else:
-                st.session_state.temp_kpi_df = rows_to_keep.reset_index(drop=True)
-                st.success(f"Đã xóa {selected_rows_count} dòng khỏi Bảng tạm.")
-with colSel3:
-    if st.button("💾 Xuất Excel (Bảng tạm)", key="export_button"):
-        if st.session_state.temp_kpi_df.empty:
-            st.error("Chưa có dữ liệu để xuất.")
-        else:
-            # Drop cột 'Chọn' trước khi xuất
-            out_df = st.session_state.temp_kpi_df.drop(columns=["Chọn"], errors="ignore")
-            bin_data = export_dataframe_to_excel(out_df)
-            file_name = f"KPI_Scorer_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            st.download_button(
-                label="⬇️ Tải file Excel",
-                data=bin_data,
-                file_name=file_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+    month_work = st.number_input("Tháng", 1, 12, value=month_work, step=1)
+    year_work = st.number_input("Năm", 2000, 2100, value=year_work, step=1)
 
 # =============================
-# 4) NẠP FILE CHUẨN 1 THÁNG → AUTO-SCORE TRỰC TIẾP TRONG LƯỚI (TÙY CHỌN)
+# 5) Khởi tạo state
 # =============================
-# Phần này giữ lại khả năng nạp file KPI_Input (Excel/CSV) và tính điểm tự động ngay trong bảng,
-# giúp anh xử lý nhanh một tháng dữ liệu độc lập (không đụng đến bảng tạm ở trên).
+if "temp_kpi_df" not in st.session_state:
+    st.session_state.temp_kpi_df = pd.DataFrame(columns=[
+        "Chọn", "Bộ phận/người phụ trách", "Tên chỉ tiêu (KPI)", "Đơn vị tính",
+        "Kế hoạch", "Thực hiện", "Trọng số", "Điểm KPI", "Tháng", "Năm"
+    ])
 
-def _norm_text(s: str) -> str:
-    if not isinstance(s, str):
-        s = str(s or "")
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch)).lower()
-    s = " ".join(s.split())
-    return s
+# =============================
+# 6) Nhập liệu – CSV/Excel và nhập tay
+# =============================
+st.markdown('<h2 class="section-title">1) Nhập dữ liệu KPI</h2>', unsafe_allow_html=True)
 
-@st.cache_data(show_spinner=False)
-def _load_kpi_input_from_xlsx(b: bytes) -> pd.DataFrame:
-    xls = pd.ExcelFile(BytesIO(b))
-    if "KPI_Input" not in xls.sheet_names:
-        raise ValueError("Không tìm thấy sheet 'KPI_Input' trong file.")
-    df = pd.read_excel(xls, sheet_name="KPI_Input")
-    required = [
-        "STT", "Nhóm/Parent", "Tên chỉ tiêu (KPI)", "Phương pháp đo kết quả",
-        "Đơn vị tính", "Bộ phận/người phụ trách", "Kế hoạch (tháng)",
-        "Thực hiện (tháng)", "Trọng số", "Điểm KPI", "Tháng", "Năm"
-    ]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Thiếu cột bắt buộc: {missing}")
-    return df[required].copy()
-
-
-def _autoscore_row_onemonth(row: pd.Series) -> float:
-    name = row.get("Tên chỉ tiêu (KPI)", "")
-    method = row.get("Phương pháp đo kết quả", "")
-    plan = row.get("Kế hoạch (tháng)")
-    actual = row.get("Thực hiện (tháng)")
-    try:
-        plan = float(plan); actual = float(actual)
-    except Exception:
-        return row.get("Điểm KPI", None)
-    txt = _norm_text(f"{name} {method}")
-    if "du bao tong thuong pham" in txt:
-        ts = row.get("Trọng số", 3)
-        return _kpi_sai_so_du_bao_diem((actual - plan) / plan * 100.0, ts)
-    ts = row.get("Trọng số", 0)
-    return compute_kpi_score(actual, plan, ts)
-
-
-def _autoscore_dataframe_onemonth(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    out = df.copy()
-    out["Điểm KPI"] = out.apply(_autoscore_row_onemonth, axis=1)
-    return out
-
-st.markdown("---")
-st.markdown('<h2 class="section-title">4) Nạp file chuẩn 1 tháng → Nhập "Thực hiện (tháng)" → Tự tính điểm</h2>', unsafe_allow_html=True)
-
-mode = st.radio(
-    "Nguồn file 1 tháng",
-    ["Tải Excel (.xlsx)", "Tải CSV (.csv)"],
-    horizontal=True,
-)
-
-mon_df = pd.DataFrame()
-if mode == "Tải Excel (.xlsx)":
-    up = st.file_uploader("Tải file Excel KPI_Input.xlsx (sheet KPI_Input)", type=["xlsx"], key="one_xlsx")
+c1, c2 = st.columns([2, 1])
+with c1:
+    up = st.file_uploader("Tải tệp CSV/Excel (một tháng)", type=["csv", "xlsx"])  # CSV hoặc Excel 1 sheet
     if up is not None:
         try:
-            mon_df = _load_kpi_input_from_xlsx(up.read())
+            if up.name.lower().endswith(".csv"):
+                df_in = pd.read_csv(up)
+            else:
+                df_in = pd.read_excel(up)
+            # Bắt buộc cột tối thiểu
+            required = {
+                "Bộ phận/người phụ trách", "Tên chỉ tiêu (KPI)", "Đơn vị tính",
+                "Kế hoạch", "Thực hiện", "Trọng số"
+            }
+            missing = [c for c in required if c not in df_in.columns]
+            if missing:
+                st.error(f"Thiếu cột bắt buộc: {missing}")
+            else:
+                df_in["Tháng"] = int(month_work)
+                df_in["Năm"] = int(year_work)
+                # Tính điểm KPI nếu có cột % sai số (ví dụ 2 chỉ tiêu dự báo)
+                df_in["Điểm KPI"] = df_in.apply(lambda r: compute_point_safe(r), axis=1)
+                st.session_state.temp_kpi_df = tidy_columns(df_in)
+                st.success(f"Đã nạp {len(df_in)} dòng từ tệp {up.name}")
         except Exception as e:
-            st.error(f"Lỗi Excel: {e}")
-elif mode == "Tải CSV (.csv)":
-    upc = st.file_uploader("Tải file CSV (cấu trúc như KPI_Input)", type=["csv"], key="one_csv")
-    if upc is not None:
-        try:
-            mon_df = pd.read_csv(upc)
-        except Exception as e:
-            st.error(f"Lỗi CSV: {e}")
+            st.error(f"Lỗi đọc tệp: {e}")
 
-if mon_df is None or mon_df.empty:
-    st.info("⚠️ Chưa có dữ liệu hợp lệ cho mục 1 tháng.")
+with c2:
+    st.info("Hoặc nhập nhanh một dòng:")
+    with st.form("quick_add"):
+        bp = st.text_input("Bộ phận/người phụ trách", value="")
+        ten = st.text_input("Tên KPI", value="")
+        dv = st.text_input("Đơn vị tính", value="%")
+        kehoach = st.number_input("Kế hoạch", value=0.0, format="%f")
+        thuchien = st.number_input("Thực hiện", value=0.0, format="%f")
+        ts = st.number_input("Trọng số", value=0.0, format="%f")
+        ok = st.form_submit_button("➕ Thêm vào bảng tạm")
+    if ok:
+        row = {
+            "Chọn": True,
+            "Bộ phận/người phụ trách": bp,
+            "Tên chỉ tiêu (KPI)": ten,
+            "Đơn vị tính": dv,
+            "Kế hoạch": kehoach,
+            "Thực hiện": thuchien,
+            "Trọng số": ts,
+            "Điểm KPI": compute_point_quick(ten, kehoach, thuchien, ts),
+            "Tháng": int(month_work),
+            "Năm": int(year_work)
+        }
+        st.session_state.temp_kpi_df = pd.concat([st.session_state.temp_kpi_df, pd.DataFrame([row])], ignore_index=True)
+        st.success("Đã thêm 1 dòng")
+
+# =============================
+# 7) Bảng tạm – chỉnh sửa trực tiếp
+# =============================
+st.markdown('<h2 class="section-title">2) Bảng tạm (chỉnh sửa và tính điểm)</h2>', unsafe_allow_html=True)
+
+if st.session_state.temp_kpi_df.empty:
+    st.warning("Bảng tạm đang rỗng. Hãy nạp tệp hoặc nhập tay ở trên.")
 else:
-    # Chuẩn hóa kiểu
-    for _col in ["Kế hoạch (tháng)", "Thực hiện (tháng)", "Trọng số", "Điểm KPI", "Tháng", "Năm"]:
-        if _col in mon_df.columns:
-            mon_df[_col] = pd.to_numeric(mon_df[_col], errors="coerce")
-
-    # Chọn tháng/năm
-    colM, colY = st.columns(2)
-    with colM:
-        month_default = int(mon_df["Tháng"].dropna().astype(int).iloc[0]) if "Tháng" in mon_df.columns and len(mon_df)>0 else datetime.now().month
-        chosen_month = st.number_input("Tháng", min_value=1, max_value=12, value=month_default, step=1)
-    with colY:
-        year_default = int(mon_df["Năm"].dropna().astype(int).iloc[0]) if "Năm" in mon_df.columns and len(mon_df)>0 else datetime.now().year
-        chosen_year = st.number_input("Năm", min_value=2000, max_value=2100, value=year_default, step=1)
-
-    base = mon_df[(mon_df["Tháng"].astype(int) == int(chosen_month)) & (mon_df["Năm"].astype(int) == int(chosen_year))].copy()
-
-    with st.expander("🔎 Tìm nhanh theo Phương pháp/Tên KPI/Bộ phận"):
-        q = st.text_input("Từ khóa", value="")
-        col1, col2 = st.columns(2)
-        with col1:
-            departments = [x for x in sorted(base["Bộ phận/người phụ trách"].dropna().astype(str).unique().tolist()) if x]
-            dept = st.multiselect("Bộ phận", departments, default=[])
-        with col2:
-            units = [x for x in sorted(base["Đơn vị tính"].dropna().astype(str).unique().tolist()) if x]
-            unit = st.multiselect("Đơn vị tính", units, default=[])
-        mask = pd.Series([True]*len(base))
-        if q:
-            qlow = q.lower()
-            mask &= base.apply(lambda r: qlow in str(r["Phương pháp đo kết quả"]).lower()
-                                           or qlow in str(r["Tên chỉ tiêu (KPI)"]).lower()
-                                           or qlow in str(r["Bộ phận/người phụ trách"]).lower(), axis=1)
-        if dept:
-            mask &= base["Bộ phận/người phụ trách"].astype(str).isin(dept)
-        if unit:
-            mask &= base["Đơn vị tính"].astype(str).isin(unit)
-        base = base[mask].copy()
-
-    # Hiển thị lưới cho phép nhập và tính
-    scored = _autoscore_dataframe_onemonth(base)
     edited = st.data_editor(
-        scored,
-        key=f"editor_onemonth_{chosen_year}_{chosen_month}",
+        st.session_state.temp_kpi_df,
+        num_rows="dynamic",
         use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Thực hiện (tháng)": st.column_config.NumberColumn(format="%f"),
-            "Trọng số": st.column_config.NumberColumn(format="%f"),
-            "Điểm KPI": st.column_config.NumberColumn(format="%f", disabled=True),
-        },
+        key="editor_temp",
+        column_config={"Chọn": st.column_config.CheckboxColumn(default=True)}
     )
+    st.session_state.temp_kpi_df = edited
 
-    # Xuất Excel
-    colL, colR = st.columns([1,1])
-    with colL:
-        if st.button("💾 Xuất Excel (.xlsx) – bảng 1 tháng"):
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-                edited.to_excel(writer, index=False, sheet_name="KPI_Input")
-                wb = writer.book
-                ws = writer.sheets["KPI_Input"]
-                fmt_header = wb.add_format({"bold": True, "bg_color": "#E2F0D9", "border": 1})
-                fmt_cell = wb.add_format({"border": 1})
-                ws.set_row(0, 22, fmt_header)
-                for i, _ in enumerate(edited.columns):
-                    ws.set_column(i, i, 22, fmt_cell)
+    cA, cB, cC, cD = st.columns([1,1,1,1])
+    with cA:
+        if st.button("🧹 Xóa dòng đã chọn"):
+            df = st.session_state.temp_kpi_df
+            if "Chọn" in df.columns:
+                df = df[df["Chọn"] != True]
+            st.session_state.temp_kpi_df = df
+    with cB:
+        if st.button("🧮 Tính lại điểm KPI"):
+            df = st.session_state.temp_kpi_df.copy()
+            df["Điểm KPI"] = df.apply(lambda r: compute_point_safe(r), axis=1)
+            st.session_state.temp_kpi_df = df
+    with cC:
+        if st.button("↩️ Làm mới tháng/năm"):
+            df = st.session_state.temp_kpi_df.copy()
+            df["Tháng"], df["Năm"] = int(month_work), int(year_work)
+            st.session_state.temp_kpi_df = df
+    with cD:
+        if st.button("⬇️ Xuất Excel (Bảng tạm)"):
+            out = BytesIO()
+            with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+                st.session_state.temp_kpi_df.to_excel(writer, index=False, sheet_name="Bang_tam")
+            st.download_button("Tải bảng tạm", out.getvalue(), file_name="Bang_tam_KPI.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# =============================
+# 8) Ghi KPI_DB theo USE/Tháng/Năm
+# =============================
+st.markdown('<h2 class="section-title">3) Ghi dữ liệu lên KPI_DB</h2>', unsafe_allow_html=True)
+
+if st.button("💾 Ghi 'Bảng tạm' vào KPI_DB", type="primary"):
+    if not connected or not spreadsheet_id:
+        st.error("Chưa kết nối Google Sheets hoặc thiếu Spreadsheet ID.")
+    elif st.session_state.temp_kpi_df.empty:
+        st.warning("Bảng tạm đang rỗng.")
+    elif not use_id or not don_vi:
+        st.warning("Thiếu USE/Đơn vị.")
+    else:
+        try:
+            ws_db = _open_sheet(client, spreadsheet_id, "KPI_DB")
+            cols_db = [
+                "USE","Đơn vị","Bộ phận/người phụ trách","Tên chỉ tiêu (KPI)","Đơn vị tính",
+                "Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm",
+                "Nhóm/Parent","Phương pháp đo kết quả","CreatedAt","UpdatedAt"
+            ]
+            _ensure_headers(ws_db, cols_db)
+            df_db = _ws_to_df(ws_db)
+
+            src = st.session_state.temp_kpi_df.drop(columns=["Chọn"], errors="ignore").copy()
+            src["USE"] = use_id
+            src["Đơn vị"] = don_vi
+            now_iso = datetime.now().isoformat(timespec="seconds")
+            src["CreatedAt"] = now_iso
+            src["UpdatedAt"] = now_iso
+            src["Nhóm/Parent"] = ""
+            src["Phương pháp đo kết quả"] = ""
+            src = src[[
+                "USE","Đơn vị","Bộ phận/người phụ trách","Tên chỉ tiêu (KPI)","Đơn vị tính",
+                "Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm",
+                "Nhóm/Parent","Phương pháp đo kết quả","CreatedAt","UpdatedAt"
+            ]]
+
+            key_cols = ["USE","Tháng","Năm","Bộ phận/người phụ trách","Tên chỉ tiêu (KPI)"]
+
+            if df_db.empty:
+                df_new = src
+            else:
+                for c in key_cols:
+                    if c in df_db.columns: df_db[c] = df_db[c].astype(str)
+                    src[c] = src[c].astype(str)
+                cur_keys = src[key_cols].apply(lambda r: "||".join(r.values), axis=1).unique().tolist()
+                df_db = df_db[~df_db[key_cols].apply(lambda r: "||".join(r.values), axis=1).isin(cur_keys)]
+                df_new = pd.concat([df_db, src], ignore_index=True)
+
+            _df_to_ws(ws_db, df_new)
+            st.success(f"Đã ghi {len(src)} dòng vào KPI_DB cho USE {use_id} ({int(month_work)}/{int(year_work)}).")
+        except Exception as e:
+            st.error(f"Lỗi khi ghi KPI_DB: {e}")
+
+# =============================
+# 9) Báo cáo: tháng / so tháng trước / so cùng kỳ
+# =============================
+st.markdown('<h2 class="section-title">4) Báo cáo KPI</h2>', unsafe_allow_html=True)
+
+if not connected or not spreadsheet_id:
+    st.info("Kết nối Google Sheets để xem báo cáo (đọc KPI_DB).")
+else:
+    try:
+        ws_db = _open_sheet(client, spreadsheet_id, "KPI_DB")
+        df_db = _ws_to_df(ws_db)
+        for c in ["Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm"]:
+            if c in df_db.columns:
+                df_db[c] = pd.to_numeric(df_db[c], errors="coerce")
+
+        cur = df_db[(df_db["USE"] == str(use_id)) & (df_db["Tháng"] == int(month_work)) & (df_db["Năm"] == int(year_work))].copy()
+        prev = df_db[(df_db["USE"] == str(use_id)) & (df_db["Năm"] == int(year_work)) & (df_db["Tháng"] == int(month_work) - 1)].copy() if int(month_work) > 1 else pd.DataFrame()
+        yoy  = df_db[(df_db["USE"] == str(use_id)) & (df_db["Tháng"] == int(month_work)) & (df_db["Năm"] == int(year_work) - 1)].copy()
+
+        def _agg(df):
+            if df is None or df.empty:
+                return pd.DataFrame(columns=["Bộ phận/người phụ trách","Tổng trọng số","Tổng điểm","% hoàn thành"])
+            g = df.groupby("Bộ phận/người phụ trách", dropna=False).agg(**{
+                "Tổng trọng số": ("Trọng số", "sum"),
+                "Tổng điểm": ("Điểm KPI", "sum"),
+            }).reset_index()
+            g["% hoàn thành"] = g.apply(lambda r: (r["Tổng điểm"]/r["Tổng trọng số"]*100) if r["Tổng trọng số"] else 0, axis=1)
+            return g
+
+        cur_g = _agg(cur); prev_g = _agg(prev); yoy_g = _agg(yoy)
+
+        st.subheader(f"📊 USE {use_id} – Tháng {int(month_work)}/{int(year_work)}")
+        st.dataframe(cur_g, use_container_width=True, hide_index=True)
+
+        st.subheader("↔️ So với tháng trước")
+        if prev_g.empty:
+            st.info("Không có dữ liệu tháng trước.")
+        else:
+            comp_prev = cur_g.merge(prev_g, on="Bộ phận/người phụ trách", how="outer", suffixes=("_hiện tại", "_tháng trước")).fillna(0)
+            comp_prev["Δ điểm"] = comp_prev["Tổng điểm_hiện tại"] - comp_prev["Tổng điểm_tháng trước"]
+            comp_prev["Δ %"] = comp_prev["% hoàn thành_hiện tại"] - comp_prev["% hoàn thành_tháng trước"]
+            st.dataframe(comp_prev, use_container_width=True, hide_index=True)
+
+        st.subheader("📈 So với cùng kỳ năm trước")
+        if yoy_g.empty:
+            st.info("Không có dữ liệu cùng kỳ.")
+        else:
+            comp_yoy = cur_g.merge(yoy_g, on="Bộ phận/người phụ trách", how="outer", suffixes=("_hiện tại", "_cùng kỳ")).fillna(0)
+            comp_yoy["Δ điểm"] = comp_yoy["Tổng điểm_hiện tại"] - comp_yoy["Tổng điểm_cùng kỳ"]
+            comp_yoy["Δ %"] = comp_yoy["% hoàn thành_hiện tại"] - comp_yoy["% hoàn thành_cùng kỳ"]
+            st.dataframe(comp_yoy, use_container_width=True, hide_index=True)
+
+        if st.button("⬇️ Xuất báo cáo Excel (3 bảng)"):
+            out = BytesIO()
+            with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+                cur_g.to_excel(writer, index=False, sheet_name="Thang_hien_tai")
+                if not prev_g.empty: comp_prev.to_excel(writer, index=False, sheet_name="So_thang_truoc")
+                if not yoy_g.empty: comp_yoy.to_excel(writer, index=False, sheet_name="So_cung_ky")
             st.download_button(
-                label="Tải về KPI_Input",
-                data=output.getvalue(),
-                file_name=f"KPI_Input_{int(chosen_year)}_{int(chosen_month):02d}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "Tải báo cáo",
+                out.getvalue(),
+                file_name=f"Bao_cao_KPI_USE_{use_id}_{int(year_work)}_{int(month_work):02d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-    with colR:
-        st.caption("Bảng trên đã hiển thị điểm KPI trực tiếp – gọn giao diện.")
+
+    except Exception as e:
+        st.error(f"Lỗi khi đọc KPI_DB: {e}")
 
 # =============================
-# FOOTER
+# 10) USE Admin – Xếp hạng đơn vị & Quên mật khẩu
 # =============================
-st.caption("© BrownEyes – KPI Scorer (CSV → Bảng tạm → Nạp Form + Module 1 tháng).")
+st.markdown('<h2 class="section-title">5) USE Admin</h2>', unsafe_allow_html=True)
+
+if connected and spreadsheet_id:
+    # Xác định quyền: email trong Meta_Units hoặc default admin
+    is_admin = False
+    try:
+        ws_meta = _open_sheet(client, spreadsheet_id, "Meta_Units")
+        df_meta = _ws_to_df(ws_meta)
+        admin_emails = df_meta[df_meta["USE"] == str(use_id)]["Email quản trị"].dropna().tolist() if "Email quản trị" in df_meta.columns else []
+        is_admin = (email_nhan_bao_cao in admin_emails) or (email_nhan_bao_cao.lower() == "phamlong666@gmail.com")
+    except Exception:
+        pass
+
+    if not is_admin:
+        st.info("Bạn không có quyền USE Admin.")
+    else:
+        st.success(f"USE Admin – {use_id}")
+
+        # Xếp hạng giữa các đơn vị
+        try:
+            ws_db = _open_sheet(client, spreadsheet_id, "KPI_DB")
+            df_db = _ws_to_df(ws_db)
+            for c in ["Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm"]:
+                if c in df_db.columns:
+                    df_db[c] = pd.to_numeric(df_db[c], errors="coerce")
+            filt = df_db[(df_db["USE"] == str(use_id)) & (df_db["Tháng"] == int(month_work)) & (df_db["Năm"] == int(year_work))].copy()
+            if filt.empty:
+                st.info("Chưa có dữ liệu kỳ này.")
+            else:
+                g = filt.groupby("Đơn vị", dropna=False).agg(**{
+                    "Tổng trọng số": ("Trọng số", "sum"),
+                    "Tổng điểm": ("Điểm KPI", "sum")
+                }).reset_index()
+                g["% hoàn thành"] = g.apply(lambda r: (r["Tổng điểm"]/r["Tổng trọng số"]*100) if r["Tổng trọng số"] else 0, axis=1)
+                g = g.sort_values("% hoàn thành", ascending=False)
+                st.subheader("🏁 Xếp hạng đơn vị")
+                st.dataframe(g, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"Lỗi so sánh đơn vị: {e}")
+
+        # Quên mật khẩu – ghi nhận & cấp tạm
+        st.subheader("🔐 Quên mật khẩu")
+        tk = st.text_input("Tài khoản (định dạng USE\\username)")
+        if st.button("Cấp mật khẩu tạm"):
+            if not tk:
+                st.warning("Nhập tài khoản.")
+            else:
+                try:
+                    tmp_pass = uuid.uuid4().hex[:8]
+                    pass_hash = hashlib.sha256(tmp_pass.encode()).hexdigest()
+
+                    # Ghi ResetRequests
+                    ws_req = _open_sheet(client, spreadsheet_id, "ResetRequests")
+                    _ensure_headers(ws_req, ["USE","Tài khoản","Thời điểm","Trạng thái","Ghi chú"])
+                    df_req = _ws_to_df(ws_req)
+                    row = pd.DataFrame([{
+                        "USE": use_id,
+                        "Tài khoản": tk,
+                        "Thời điểm": datetime.now().isoformat(timespec="seconds"),
+                        "Trạng thái": "Đã cấp mật khẩu tạm",
+                        "Ghi chú": f"Gửi admin {email_nhan_bao_cao}"
+                    }])
+                    df_req = pd.concat([df_req, row], ignore_index=True)
+                    _df_to_ws(ws_req, df_req)
+
+                    # Cập nhật Users (upsert mật khẩu_băm)
+                    ws_users = _open_sheet(client, spreadsheet_id, "Users")
+                    _ensure_headers(ws_users, ["USE","Tài khoản (USE\\username)","Họ tên","Email","Mật khẩu_băm","Vai trò (admin/user)","Kích hoạt"])
+                    df_users = _ws_to_df(ws_users)
+                    if df_users.empty:
+                        df_users = pd.DataFrame(columns=["USE","Tài khoản (USE\\username)","Họ tên","Email","Mật khẩu_băm","Vai trò (admin/user)","Kích hoạt"])
+
+                    if (not df_users.empty) and (df_users["Tài khoản (USE\\username)"].astype(str) == tk).any():
+                        df_users.loc[df_users["Tài khoản (USE\\username)"].astype(str) == tk, ["USE","Mật khẩu_băm","Kích hoạt"]] = [use_id, pass_hash, "1"]
+                    else:
+                        df_users = pd.concat([df_users, pd.DataFrame([{
+                            "USE": use_id,
+                            "Tài khoản (USE\\username)": tk,
+                            "Họ tên": "",
+                            "Email": "",
+                            "Mật khẩu_băm": pass_hash,
+                            "Vai trò (admin/user)": "user",
+                            "Kích hoạt": "1"
+                        }])], ignore_index=True)
+
+                    _df_to_ws(ws_users, df_users)
+                    st.success(f"Đã cấp mật khẩu tạm: **{tmp_pass}** (đã ghi sổ). Admin {email_nhan_bao_cao} sẽ kiểm tra và cung cấp lại cho người dùng.")
+                except Exception as e:
+                    st.error(f"Lỗi cấp mật khẩu tạm: {e}")
+
+# =============================
+# 11) Hàm tính điểm KPI – xử lý an toàn
+# =============================
+
+def compute_point_quick(ten_kpi: str, ke_hoach: float, thuc_hien: float, trong_so: float) -> float:
+    """Tính điểm đơn giản khi nhập tay. Có nhánh riêng cho 2 KPI dự báo của EVN.
+    - Hai KPI "Dự báo tổng thương phẩm…": điểm tối đa 3đ; mỗi 0.1% vượt sai số trừ 0.04đ.
+    - Mặc định: điểm = min(100, thực hiện/ kế hoạch * 100) * (trọng số/100)
+    """
+    try:
+        name = (ten_kpi or "").lower()
+        if "dự báo tổng thương phẩm" in name:
+            # giả định cột Thực hiện là % sai số tuyệt đối
+            sai_so = abs(float(thuc_hien))
+            base = 3.0
+            if sai_so <= 1.5:
+                phat = 0.0
+            else:
+                phat = ((sai_so - 1.5) / 0.1) * 0.04
+            return max(0.0, base - phat)
+        # Mặc định
+        if ke_hoach and ke_hoach != 0:
+            ti_le = (float(thuc_hien) / float(ke_hoach)) * 100
+        else:
+            ti_le = 0
+        return min(100.0, max(0.0, ti_le)) * (float(trong_so) / 100.0)
+    except Exception:
+        return 0.0
+
+
+def compute_point_safe(r: pd.Series) -> float:
+    try:
+        return compute_point_quick(
+            str(r.get("Tên chỉ tiêu (KPI)", "")),
+            float(r.get("Kế hoạch", 0) or 0),
+            float(r.get("Thực hiện", 0) or 0),
+            float(r.get("Trọng số", 0) or 0),
+        )
+    except Exception:
+        return 0.0
+
+
+def tidy_columns(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "Chọn", "Bộ phận/người phụ trách", "Tên chỉ tiêu (KPI)", "Đơn vị tính",
+        "Kế hoạch", "Thực hiện", "Trọng số", "Điểm KPI", "Tháng", "Năm"
+    ]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+    df = df[cols]
+    # ép kiểu số
+    for c in ["Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    # default tick chọn
+    if "Chọn" in df.columns:
+        df["Chọn"] = df["Chọn"].fillna(True)
+    return df
+
+# =============================
+# End of file
+# =============================
