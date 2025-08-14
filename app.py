@@ -210,6 +210,7 @@ def init_session_state():
     st.session_state.setdefault("connected", False)
     st.session_state.setdefault("connect_msg", "")
     # ✅ LƯU TRẠNG THÁI BẢNG TẠM VỚI DF
+    # Nếu DataFrame chưa tồn tại, tạo mới. Nếu đã tồn tại, dùng lại.
     if "temp_kpi_df" not in st.session_state:
         st.session_state.temp_kpi_df = pd.DataFrame(columns=["Chọn"] + EXPECTED_KPI_COLS)
 
@@ -373,9 +374,13 @@ else:
         "Điểm KPI": st.column_config.NumberColumn(format="%.4f", disabled=True),
     }
 
-    # Gán trực tiếp kết quả của data_editor vào session state
+    # Bắt đầu xử lý với cơ chế cập nhật trạng thái mới.
+    # Lấy DataFrame từ session state
+    df_to_edit = st.session_state.temp_kpi_df
+    
+    # Hiển thị data editor và gán lại cho session state
     st.session_state.temp_kpi_df = st.data_editor(
-        st.session_state.temp_kpi_df,
+        df_to_edit,
         key="temp_table_editor",
         use_container_width=True,
         hide_index=True,
