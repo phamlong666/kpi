@@ -17,6 +17,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from io import BytesIO
 import hashlib, uuid, base64, json
+# Thêm import cho Fernet
+from cryptography.fernet import Fernet
 
 # =========================
 # Page config + Logo + Title
@@ -35,7 +37,7 @@ def verify_pw(plain: str, hashed: str) -> bool:
     return hash_pw(plain) == str(hashed)
 
 # =========================
-# Loader Google SA (multi-mode)
+# Loader Google SA (multi-mode) + Client SAFE (không st.stop)
 # =========================
 def _from_plain_block():
     try:
@@ -50,7 +52,8 @@ def _from_plain_block():
         return None
 
 def load_sa_from_secret():
-    """Ưu tiên Fernet (fernet_key + gsa_enc), fallback JSON / base64."""
+    """Ưu tiên Fernet (fernet_key + gsa_enc), fallback JSON / base64. Không raise, chỉ trả None nếu thiếu."""
+    # Thử Fernet nếu có
     try:
         from cryptography.fernet import Fernet
         gsa_enc_b64 = st.secrets.get("gsa_enc")
@@ -61,21 +64,40 @@ def load_sa_from_secret():
             sa = json.loads(sa_bytes.decode())
             if "private_key" in sa:
                 sa["private_key"] = sa["private_key"].replace("\\n", "\n")
-            return sa
+            return sa, "fernet"
     except Exception:
+        pass
+    # Fallback: block JSON/base64
+    sa_legacy = _from_plain_block()
+    if sa_legacy:
+        return sa_legacy, "legacy"
+    return None, "none"
+
+@st.cache_resource(show_spinner=False)
+def get_client_safe():
+    sa_dict, mode = load_sa_from_secret()
+    if not sa_dict:
+        return None, mode, "Thiếu secrets (fernet_key+gsa_enc) hoặc [gdrive_service_account]."
+    try:
+        scope = ["https://spreadsheets.google.com/feeds",
+                 "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_dict, scope)
+        client = gspread.authorize(creds)
+        return client, mode, None
+    except Exception as e:
+        return None, mode, f"Lỗi Google auth: {e}"
+
+client, sa_mode, client_err = get_client_safe()
+connected = client is not None
+
+# Banner trạng thái kết nối (không chặn UI)
+if not connected:
+    st.warning(client_err or "Chưa cấu hình Service Account. Vẫn có thể xem giao diện, nhưng sẽ không đọc/ghi Google Sheets.")
+else:
+    if sa_mode == "legacy":
         st.info("Đang dùng chế độ kết nối dự phòng (không dùng Fernet).")
-    return _from_plain_block()
-
-def get_client():
-    sa = load_sa_from_secret()
-    if not sa:
-        st.stop()
-    scope = ["https://spreadsheets.google.com/feeds",
-             "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(sa, scope)
-    return gspread.authorize(creds)
-
-client = get_client()
+    elif sa_mode == "fernet":
+        st.caption("Đang dùng Service Account giải mã bằng Fernet.")
 
 # =========================
 # Sheet helpers
@@ -286,3 +308,4 @@ if st.session_state.get("role")=="admin":
         df["Điểm KPI"]=pd.to_numeric(df["Điểm KPI"],errors="coerce")
         ranking=df.groupby(["USE","Tháng","Năm"]).agg({"Điểm KPI":"sum"}).reset_index()
         st.dataframe(ranking.sort_values(["Năm","Tháng","Điểm KPI"],ascending=[False,False,False]))
+
