@@ -1,60 +1,25 @@
-
-# === UI UPGRADE: Title & Logo & Micro Interactions ===
-st.markdown(
-    """
-    <style>
-    .big-kpi-title { 
-        font-size: 36px !important; 
-        font-weight: 800; 
-        letter-spacing: 0.2px;
-        line-height: 1.2;
-        margin: 6px 0 2px 0;
-        color: #0F1E49;
-        text-shadow: 0 0 1px rgba(0,0,0,0.04);
-    }
-    /* hiệu ứng hover nhẹ cho checkbox list */
-    div[data-testid="stVerticalBlock"] label:hover { 
-        filter: brightness(1.05);
-        transform: translateX(2px);
-        transition: all .15s ease-in-out;
-    }
-    /* Logo tròn sang BÊN TRÁI */
-    .floating-logo { 
-        position: fixed; 
-        left: 14px; top: 12px; 
-        z-index: 1000; 
-        width: 56px; height: 56px; object-fit: contain;
-        box-shadow: 0 3px 12px rgba(0,0,0,0.10);
-        border-radius: 50%;
-        background: white;
-        padding: 4px;
-    }
-    </style>
-    """, 
-    unsafe_allow_html=True
-)
-
-# Phóng to dòng tiêu đề cụ thể nếu có
-try:
-    _html_title = '<div class="big-kpi-title">KPI Đội quản lý Điện lực khu vực Định Hóa</div>'
-    st.markdown(_html_title, unsafe_allow_html=True)
-except Exception:
-    pass
-
-# -*- coding: utf-8 -*-
-import streamlit as st
-import pandas as pd
-from datetime import datetime
-from io import BytesIO
+from datetime import d
+from io import B
 import base64
 import os
+import pandas
+import pandas as pd
+import streamlit
+import streamlit as st
 import unicodedata
+
+# -*- coding: utf-8 -*-
+ as st
+ as pd
+atetime
+ytesIO
 
 # =============================
 # CẤU HÌNH TRANG
 # =============================
 st.set_page_config(
-    page_title="KPI Scorer – Định Hóa (Full Suite)",
+    page_title="KPI Scorer – Định Hóa (Full Suite)
+",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -77,92 +42,8 @@ EXPECTED_KPI_COLS = [
 
 
 def _safe_number(x, default=0.0):
-    try:
-        if x is None or x == "":
-            return float(default)
-        return float(x)
-    except Exception:
-        return float(default)
-
-
-# --- CÔNG THỨC CHUNG ---
-
-def compute_kpi_score(thuc_hien, ke_hoach, trong_so):
-    ke_hoach = _safe_number(ke_hoach, 0.0)
-    thuc_hien = _safe_number(thuc_hien, 0.0)
-    trong_so = _safe_number(trong_so, 0.0)
-    if ke_hoach == 0:
-        return 0.0
-    return round((thuc_hien / ke_hoach) * trong_so, 4)
-
-
-# --- KPI DỰ BÁO TỔNG THƯƠNG PHẨM (±1.5%; vượt 0.1% trừ 0.04; trần 3đ) ---
-
-def _kpi_sai_so_du_bao_diem(sai_so_percent, trong_so):
-    sai_so = abs(_safe_number(sai_so_percent, 0.0))
-    ts = min(_safe_number(trong_so, 0.0), 3.0)  # trần 3 điểm
-    if sai_so <= 1.5:
-        return ts
-    vuot = sai_so - 1.5
-    tru = (vuot / 0.1) * 0.04
-    tru = min(tru, 3.0)
-    return max(round(ts - tru, 4), 0.0)
-
-
-def _is_du_bao_tong_thuong_pham(ten_chi_tieu: str) -> bool:
-    if not ten_chi_tieu:
-        return False
-    s = ten_chi_tieu.strip().lower()
-    return "dự báo tổng thương phẩm" in s
-
-
-def compute_kpi_score_dynamic(ten_chi_tieu, thuc_hien, ke_hoach, trong_so):
-    # Nếu là KPI dự báo → thuc_hien coi là sai số (%) theo tháng
-    if _is_du_bao_tong_thuong_pham(ten_chi_tieu):
-        return _kpi_sai_so_du_bao_diem(thuc_hien, trong_so)
-    return compute_kpi_score(thuc_hien, ke_hoach, trong_so)
-
-
-def export_dataframe_to_excel(df: pd.DataFrame) -> bytes:
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="KPI")
-        workbook = writer.book
-        worksheet = writer.sheets["KPI"]
-        fmt = workbook.add_format({"text_wrap": True, "valign": "vcenter"})
-        worksheet.set_column(0, len(df.columns)-1, 22, fmt)
-    buffer.seek(0)
-    return buffer.read()
-
-
-# =============================
-# LOGO TRÒN (đa nguồn + mặc định GitHub của anh Long)
-# =============================
-
-def _detect_logo_bytes():
-    """Ưu tiên:
-    1) secrets['ui']['logo_url'] hoặc secrets['logo_url']
-    2) /mnt/data/logo.png
-    3) ./assets/logo.png hoặc ./.streamlit/logo.png
-    4) ENV LOGO_URL
-    5) DEFAULT_LOGO_URL (GitHub của anh Long)
-    """
-    DEFAULT_LOGO_URL = "https://raw.githubusercontent.com/phamlong666/kpi/main/logo_hinh_tron.png"
-    try:
-        ui = st.secrets.get("ui", {})
-        logo_url = ui.get("logo_url") or st.secrets.get("logo_url")
-        if logo_url:
-            return f'<img class="floating-logo" src="{logo_url}" />', "secrets.logo_url"
-    except Exception:
-        pass
     for p in ["/mnt/data/logo.png", "./assets/logo.png", "./.streamlit/logo.png"]:
         if os.path.exists(p):
-            try:
-                with open(p, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode()
-                return f'<img class="floating-logo" src="data:image/png;base64,{b64}" />', p
-            except Exception:
-                pass
     env_logo = os.getenv("LOGO_URL")
     if env_logo:
         return f'<img class="floating-logo" src="{env_logo}" />', "env.LOGO_URL"
@@ -188,10 +69,6 @@ def _inject_ui_enhancements():
     @keyframes pop{0%{transform:scale(.6);opacity:.2}100%{transform:scale(1);opacity:1}}
     </style>
     """
-    st.markdown(css, unsafe_allow_html=True)
-    st.markdown(logo_tag, unsafe_allow_html=True)
-
-
 # =============================
 # GOOGLE SHEETS (tùy chọn) & SESSION STATE
 # =============================
@@ -222,8 +99,6 @@ def get_gspread_client_if_possible():
     try:
         from oauth2client.service_account import ServiceAccountCredentials
         import gspread
-
-
     except Exception as e:
         return None, f"Thiếu thư viện gspread/oauth2client: {e}"
     try:
@@ -277,8 +152,6 @@ with st.sidebar:
     )
     nhom_cham = st.selectbox("Nhóm chấm", [1,2,3,4,5], index=1)
     email_nhan_bao_cao = st.text_input("Email nhận báo cáo", "phamlong666@gmail.com")
-
-    st.markdown("---")
     st.caption("Mắt Nâu vẫn cho phép **nhập KPI thủ công** kể cả khi chưa kết nối Google.")
 
 connected = False
@@ -297,23 +170,6 @@ st.session_state.connected = connected
 st.session_state.connect_msg = connect_msg
 
 _inject_ui_enhancements()
-st.markdown(
-    """
-<div class="title-card">
-  <h1><span class="title-icon">📊</span><span class="title-text">KPI Đội quản lý Điện lực khu vực Định Hóa</span></h1>
-  <p class="subtitle">Luồng chuẩn: Upload CSV → thêm vào Bảng tạm → chọn dòng → tự nạp lên Form nhập → tính điểm ngay.</p>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# =============================
-# 3) NHẬP THỦ CÔNG KPI & XUẤT EXCEL (9 CỘT)
-#    + NẠP CSV VÀO BẢNG TẠM & CHỌN DÒNG ĐỂ NẠP LÊN FORM
-# =============================
-st.markdown("---")
-st.markdown('<h2 class="section-title">3) Nhập thủ công KPI & Xuất Excel (9 cột)</h2>', unsafe_allow_html=True)
-
 # ---- 3.a) UPLOAD CSV → ĐỔ VÀO BẢNG TẠM ----
 with st.expander("Nạp CSV vào 'Bảng tạm'", expanded=False):
     up_csv = st.file_uploader(
@@ -394,12 +250,6 @@ with st.form("kpi_input_form", clear_on_submit=False):
         new_row_df = pd.DataFrame([new_row_data], columns=["Chọn"] + EXPECTED_KPI_COLS)
         st.session_state.temp_kpi_df = pd.concat([st.session_state.temp_kpi_df, new_row_df], ignore_index=True)
         st.success("Đã thêm 1 dòng KPI vào bảng tạm.")
-
-# ---- 3.c) BẢNG TẠM: CHỌN DÒNG → NẠP LÊN FORM & XUẤT EXCEL ----
-
-# ---- 3.c) BẢNG TẠM — KPI One-Click (tick 100%) ----
-st.markdown("### **Bảng tạm (One‑Click)** – tick vào các dòng cần xử lý")
-
 df_tmp = st.session_state.get("temp_kpi_df", pd.DataFrame()).copy()
 if df_tmp.empty:
     st.info("Bảng tạm chưa có dữ liệu.")
@@ -442,3 +292,36 @@ else:
 
     # Ghi lại vào session
     st.session_state.temp_kpi_df = df_tmp
+st.markdown(
+    """
+    <style>
+    .big-kpi-title { 
+        font-size: 36px !important; 
+        font-weight: 800; 
+        letter-spacing: 0.2px;
+        line-height: 1.2;
+        margin: 6px 0 2px 0;
+        color: #0F1E49;
+        text-shadow: 0 0 1px rgba(0,0,0,0.04);
+    }
+    /* hiệu ứng hover nhẹ cho checkbox list */
+    div[data-testid="stVerticalBlock"] label:hover { 
+        filter: brightness(1.05);
+        transform: translateX(2px);
+        transition: all .15s ease-in-out;
+    }
+    /* Logo tròn sang BÊN TRÁI */
+    .floating-logo { 
+        position: fixed; 
+        left: 14px; top: 12px; 
+        z-index: 1000; 
+        width: 56px; height: 56px; object-fit: contain;
+        box-shadow: 0 3px 12px rgba(0,0,0,0.10);
+        border-radius: 50%;
+        background: white;
+        padding: 4px;
+    }
+    </style>
+    """, 
+    unsafe_allow_html=True
+)
