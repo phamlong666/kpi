@@ -367,14 +367,16 @@ else:
 sel_map = st.session_state.get("temp_selected", {})
 chons = [bool(sel_map.get(i, False)) for i in df_manual["__row_id"].tolist()]
 
-# DataFrame hiển thị (khóa __row_id ẩn, Chọn ở cột đầu)
+# Tạo DataFrame hiển thị, sử dụng list of booleans cho cột 'Chọn'
 df_display = df_manual.copy()
 df_display.insert(0, "Chọn", chons)
 
 # Cấu hình cột: chỉ cho phép tick "Chọn", các cột còn lại khóa lại
 colcfg = {
-    # FIX: Bỏ disabled=True khỏi cột "Chọn" để cho phép tương tác
-    "Chọn": st.column_config.CheckboxColumn(help="Đánh dấu 1 dòng để nạp lên Form"),
+    "Chọn": st.column_config.CheckboxColumn(
+        "Chọn",
+        help="Đánh dấu một dòng để nạp lên Form",
+    ),
     "Tên chỉ tiêu (KPI)": st.column_config.TextColumn(disabled=True),
     "Đơn vị tính": st.column_config.TextColumn(disabled=True),
     "Kế hoạch": st.column_config.NumberColumn(disabled=True),
