@@ -163,8 +163,10 @@ def read_service_account_from_secrets():
             raise RuntimeError("Không tìm thấy google_service_account hoặc gdrive_service_account trong secrets.") from e
     conf = dict(conf)
     if "private_key" in conf and conf["private_key"]:
-        # FIX: thay \\n bằng xuống dòng thật
-        conf["private_key"] = conf["private_key"].replace("\\n", "\\n").replace("\\\\n", "\n")
+        # FIX: thay 
+ bằng xuống dòng thật
+        conf["private_key"] = conf["private_key"].replace("\n", "
+")
         return conf
     if "private_key_b64" in conf and conf["private_key_b64"]:
         import base64
@@ -208,6 +210,9 @@ def init_session_state():
     # Google flags
     st.session_state.setdefault("connected", False)
     st.session_state.setdefault("connect_msg", "")
+    # ✅ LƯU TRẠNG THÁI TÍCH CHỌN HÀNG TRONG BẢNG TẠM (để không bị mất khi rerun)
+    # key: __row_id → bool
+    st.session_state.setdefault("temp_selected", {})
 
 
 # =============================
@@ -220,8 +225,10 @@ with st.sidebar:
     spreadsheet_id = st.text_input(
         "Spreadsheet ID",
         help=(
-            "Dán ID của Google Sheets. Ví dụ từ URL:\n"
-            "https://docs.google.com/spreadsheets/d/1AbCdEfGh.../edit#gid=0\n"
+            "Dán ID của Google Sheets. Ví dụ từ URL:
+"
+            "https://docs.google.com/spreadsheets/d/1AbCdEfGh.../edit#gid=0
+"
             "=> Spreadsheet ID là phần giữa /d/ và /edit"
         ),
     )
@@ -342,33 +349,74 @@ with st.form("kpi_input_form", clear_on_submit=False):
         st.success("Đã thêm 1 dòng KPI vào bảng tạm.")
 
 # ---- 3.c) BẢNG TẠM: CHỌN DÒNG → NẠP LÊN FORM & XUẤT EXCEL ----
+# Tạo DataFrame từ bảng tạm
 df_manual = pd.DataFrame(st.session_state.kpi_rows, columns=EXPECTED_KPI_COLS) if st.session_state.kpi_rows else pd.DataFrame(columns=EXPECTED_KPI_COLS)
 
 st.markdown("**Bảng tạm (tick cột *Chọn* rồi nhấn ▶ Nạp dòng đã chọn lên Form):**")
 
+# ✅ Tạo __row_id ổn định để lưu trạng thái chọn
+if not df_manual.empty:
+    df_manual["__row_id"] = (
+        df_manual["Tên chỉ tiêu (KPI)"].astype(str).fillna("") + "|" +
+        df_manual["Đơn vị tính"].astype(str).fillna("") + "|" +
+        df_manual["Bộ phận/người phụ trách"].astype(str).fillna("") + "|" +
+        df_manual["Tháng"].astype(str).fillna("") + "|" +
+        df_manual["Năm"].astype(str).fillna("")
+    )
+else:
+    df_manual["__row_id"] = []
+
+# ✅ Dựng cột "Chọn" từ state, để tick không bị mất khi app rerun
+sel_map = st.session_state.get("temp_selected", {})
+chons = [bool(sel_map.get(i, False)) for i in df_manual["__row_id"].tolist()]
+
+# DataFrame hiển thị (khóa __row_id ẩn, Chọn ở cột đầu)
 df_display = df_manual.copy()
-df_display.insert(0, "Chọn", False)
+df_display.insert(0, "Chọn", chons)
+
+# Cấu hình cột: chỉ cho phép tick "Chọn", các cột còn lại khóa lại
+colcfg = {
+    "Chọn": st.column_config.CheckboxColumn(help="Đánh dấu 1 dòng để nạp lên Form"),
+    "Tên chỉ tiêu (KPI)": st.column_config.TextColumn(disabled=True),
+    "Đơn vị tính": st.column_config.TextColumn(disabled=True),
+    "Kế hoạch": st.column_config.NumberColumn(disabled=True),
+    "Thực hiện": st.column_config.NumberColumn(disabled=True),
+    "Trọng số": st.column_config.NumberColumn(disabled=True),
+    "Bộ phận/người phụ trách": st.column_config.TextColumn(disabled=True),
+    "Tháng": st.column_config.NumberColumn(disabled=True),
+    "Năm": st.column_config.NumberColumn(disabled=True),
+    "Điểm KPI": st.column_config.NumberColumn(format="%.4f", disabled=True),
+}
 
 edited_temp = st.data_editor(
     df_display,
     key="temp_table_editor",
     use_container_width=True,
     hide_index=True,
-    column_config={
-        "Chọn": st.column_config.CheckboxColumn(help="Đánh dấu 1 dòng để nạp lên Form"),
-        "Điểm KPI": st.column_config.NumberColumn(format="%.4f", disabled=True),
-    },
+    column_config=colcfg,
+    num_rows="fixed",
 )
+
+# ✅ CẬP NHẬT LẠI state lựa chọn sau mỗi lần rerun
+if not edited_temp.empty:
+    try:
+        for _id, _chon in zip(edited_temp["__row_id"].tolist(), edited_temp["Chọn"].tolist()):
+            st.session_state.temp_selected[_id] = bool(_chon)
+    except Exception:
+        pass
 
 colSel1, colSel2, colSel3 = st.columns([1,1,2])
 with colSel1:
     if st.button("▶ Nạp dòng đã chọn lên Form"):
-        chosen_idx = edited_temp.index[edited_temp["Chọn"] == True].tolist()
-        if not chosen_idx:
+        # Lấy danh sách id đã chọn từ state (bền vững)
+        selected_ids = [k for k, v in st.session_state.temp_selected.items() if v]
+        if not selected_ids:
             st.warning("Chưa chọn dòng nào (tick vào cột 'Chọn').")
         else:
-            i = chosen_idx[-1]
-            r = edited_temp.loc[i]
+            # Ưu tiên dòng cuối cùng vừa tick
+            sel_id = selected_ids[-1]
+            r = df_manual[df_manual["__row_id"] == sel_id].iloc[0]
+            # Gán lên form
             st.session_state['ten_kpi'] = str(r["Tên chỉ tiêu (KPI)"])
             st.session_state['dvt'] = str(r["Đơn vị tính"]) or ""
             st.session_state['ke_hoach'] = float(_safe_number(r["Kế hoạch"], 0))
@@ -380,13 +428,17 @@ with colSel1:
             st.success("Đã nạp dòng đã chọn lên Form. Anh chỉnh 'Thực hiện' để ra điểm KPI.")
 with colSel2:
     if st.button("🗑️ Xóa dòng tick chọn"):
-        idxs = edited_temp.index[edited_temp["Chọn"] == True].tolist()
-        if not idxs:
+        selected_ids = [k for k, v in st.session_state.temp_selected.items() if v]
+        if not selected_ids:
             st.info("Chưa tick chọn dòng nào.")
         else:
-            keys = set((str(edited_temp.loc[i,"Tên chỉ tiêu (KPI)"]), int(edited_temp.loc[i,"Tháng"]), int(edited_temp.loc[i,"Năm"])) for i in idxs)
-            st.session_state.kpi_rows = [r for r in st.session_state.kpi_rows if (r["Tên chỉ tiêu (KPI)"], r["Tháng"], r["Năm"]) not in keys]
-            st.success(f"Đã xóa {len(idxs)} dòng khỏi Bảng tạm.")
+            # Xóa khỏi bảng tạm theo __row_id
+            keep_mask = ~df_manual["__row_id"].isin(selected_ids)
+            st.session_state.kpi_rows = df_manual[keep_mask].drop(columns=["__row_id"]).to_dict(orient="records")
+            # Xóa trạng thái chọn tương ứng
+            for k in selected_ids:
+                st.session_state.temp_selected.pop(k, None)
+            st.success(f"Đã xóa {len(selected_ids)} dòng khỏi Bảng tạm.")
 with colSel3:
     if st.button("💾 Xuất Excel (Bảng tạm)"):
         if len(st.session_state.kpi_rows) == 0:
