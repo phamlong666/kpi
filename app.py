@@ -37,7 +37,7 @@ def verify_pw(plain: str, hashed: str) -> bool:
     return hash_pw(plain) == str(hashed)
 
 # =========================
-# Loader Google SA (multi-mode) + Client SAFE (không st.stop)
+# Loader Google SA (multi-mode) + Client SAFE
 # =========================
 def _from_plain_block():
     try:
@@ -55,7 +55,6 @@ def load_sa_from_secret():
     """Ưu tiên Fernet (fernet_key + gsa_enc), fallback JSON / base64. Không raise, chỉ trả None nếu thiếu."""
     # Thử Fernet nếu có
     try:
-        from cryptography.fernet import Fernet
         gsa_enc_b64 = st.secrets.get("gsa_enc")
         fernet_key  = st.secrets.get("fernet_key")
         if gsa_enc_b64 and fernet_key:
@@ -73,7 +72,6 @@ def load_sa_from_secret():
         return sa_legacy, "legacy"
     return None, "none"
 
-@st.cache_resource(show_spinner=False)
 def get_client_safe():
     sa_dict, mode = load_sa_from_secret()
     if not sa_dict:
@@ -87,23 +85,31 @@ def get_client_safe():
     except Exception as e:
         return None, mode, f"Lỗi Google auth: {e}"
 
-client, sa_mode, client_err = get_client_safe()
-connected = client is not None
+# Khởi tạo session state
+if "client" not in st.session_state:
+    st.session_state["client"] = None
+if "connected" not in st.session_state:
+    st.session_state["connected"] = False
+if "client_err" not in st.session_state:
+    st.session_state["client_err"] = ""
 
-# Banner trạng thái kết nối (không chặn UI)
-if not connected:
-    st.warning(client_err or "Chưa cấu hình Service Account. Vẫn có thể xem giao diện, nhưng sẽ không đọc/ghi Google Sheets.")
-else:
-    if sa_mode == "legacy":
-        st.info("Đang dùng chế độ kết nối dự phòng (không dùng Fernet).")
-    elif sa_mode == "fernet":
-        st.caption("Đang dùng Service Account giải mã bằng Fernet.")
+# Banner trạng thái kết nối
+if not st.session_state.connected:
+    st.warning(st.session_state.client_err or "Chưa cấu hình Service Account. Vẫn có thể xem giao diện, nhưng sẽ không đọc/ghi Google Sheets.")
+elif st.session_state.sa_mode == "legacy":
+    st.info("Đang dùng chế độ kết nối dự phòng (không dùng Fernet).")
+elif st.session_state.sa_mode == "fernet":
+    st.caption("Đang dùng Service Account giải mã bằng Fernet.")
+
 
 # =========================
 # Sheet helpers
 # =========================
 def open_ws(spreadsheet_id, sheet_name):
-    sh = client.open_by_key(spreadsheet_id)
+    if st.session_state.client is None:
+        st.error("Client chưa được kết nối.")
+        return None
+    sh = st.session_state.client.open_by_key(spreadsheet_id)
     try:
         return sh.worksheet(sheet_name)
     except:
@@ -142,170 +148,204 @@ with st.sidebar:
     pw_input  = st.text_input("Mật khẩu", type="password")
 
     if st.button("Đăng nhập", use_container_width=True):
-        ws = open_ws(spreadsheet_id, "Users")
-        ensure_headers(ws, ["USE","Tài khoản (USE\\username)","Họ tên","Email",
-                            "Mật khẩu_băm","Vai trò","Kích hoạt"])
-        df = ws_to_df(ws)
-        row = df[df["Tài khoản (USE\\username)"].astype(str)==acc_input]
-        if row.empty: st.error("Không tìm thấy tài khoản")
+        client, sa_mode, client_err = get_client_safe()
+        if client:
+            st.session_state.client = client
+            st.session_state.connected = True
+            st.session_state.sa_mode = sa_mode
+            st.session_state.client_err = None
+            
+            ws = open_ws(spreadsheet_id, "Users")
+            if ws:
+                ensure_headers(ws, ["USE","Tài khoản (USE\\username)","Họ tên","Email",
+                                    "Mật khẩu_băm","Vai trò","Kích hoạt"])
+                df = ws_to_df(ws)
+                row = df[df["Tài khoản (USE\\username)"].astype(str)==acc_input]
+                if row.empty: st.error("Không tìm thấy tài khoản")
+                else:
+                    r=row.iloc[0]
+                    if str(r.get("Kích hoạt","1"))=="0": st.error("Chưa kích hoạt")
+                    elif verify_pw(pw_input, r.get("Mật khẩu_băm","")):
+                        st.session_state.update({"is_auth":True,
+                                                "auth_acc":acc_input,
+                                                "auth_use":str(r.get("USE","")),
+                                                "role":r.get("Vai trò","user")})
+                        st.success("Đăng nhập thành công")
+                    else: st.error("Sai mật khẩu")
         else:
-            r=row.iloc[0]
-            if str(r.get("Kích hoạt","1"))=="0": st.error("Chưa kích hoạt")
-            elif verify_pw(pw_input, r.get("Mật khẩu_băm","")):
-                st.session_state.update({"is_auth":True,
-                                         "auth_acc":acc_input,
-                                         "auth_use":str(r.get("USE","")),
-                                         "role":r.get("Vai trò","user")})
-                st.success("Đăng nhập thành công")
-            else: st.error("Sai mật khẩu")
+            st.session_state.connected = False
+            st.session_state.client_err = client_err
+            st.error(client_err)
+
 
     if st.button("Đăng xuất", use_container_width=True):
         st.session_state.clear(); st.experimental_rerun()
 
     with st.expander("🧩 Đồng bộ Users từ sheet USE"):
         if st.button("Đồng bộ ngay"):
-            ws_src = open_ws(spreadsheet_id,"USE")
-            df_src = ws_to_df(ws_src)
-            need = {"Tên đơn vị","USE (mã đăng nhập)","Mật khẩu mặc định"}
-            if not need.issubset(df_src.columns): st.error("Sheet USE thiếu cột")
-            else:
-                ws_u = open_ws(spreadsheet_id,"Users")
-                ensure_headers(ws_u,["USE","Tài khoản (USE\\username)","Họ tên","Email",
-                                     "Mật khẩu_băm","Vai trò","Kích hoạt"])
-                df_u = ws_to_df(ws_u)
-                if df_u.empty:
-                    df_u=pd.DataFrame(columns=["USE","Tài khoản (USE\\username)","Họ tên",
-                                               "Email","Mật khẩu_băm","Vai trò","Kích hoạt"])
-                add=[]
-                for _,r in df_src.iterrows():
-                    unit=str(r.get("Tên đơn vị",""))
-                    acc=str(r.get("USE (mã đăng nhập)","")).strip()
-                    pw=str(r.get("Mật khẩu mặc định","123456"))
-                    if not acc: continue
-                    role="admin" if unit.lower()=="admin" else "user"
-                    if (df_u["Tài khoản (USE\\username)"].astype(str)==acc).any():
-                        df_u.loc[df_u["Tài khoản (USE\\username)"].astype(str)==acc,
-                                 ["USE","Mật khẩu_băm","Vai trò","Kích hoạt"]]=[
-                                     acc.split("\\")[0],hash_pw(pw),role,"1"]
+            client, sa_mode, client_err = get_client_safe()
+            if client:
+                st.session_state.client = client
+                st.session_state.connected = True
+                st.session_state.sa_mode = sa_mode
+                st.session_state.client_err = None
+                
+                ws_src = open_ws(spreadsheet_id,"USE")
+                if ws_src:
+                    df_src = ws_to_df(ws_src)
+                    need = {"Tên đơn vị","USE (mã đăng nhập)","Mật khẩu mặc định"}
+                    if not need.issubset(df_src.columns): st.error("Sheet USE thiếu cột")
                     else:
-                        add.append({"USE":acc.split("\\")[0],
-                                    "Tài khoản (USE\\username)":acc,
-                                    "Họ tên":"","Email":"",
-                                    "Mật khẩu_băm":hash_pw(pw),
-                                    "Vai trò":role,"Kích hoạt":"1"})
-                if add: df_u=pd.concat([df_u,pd.DataFrame(add)],ignore_index=True)
-                df_to_ws(ws_u,df_u); st.success(f"Đồng bộ xong {len(df_u)} tài khoản")
+                        ws_u = open_ws(spreadsheet_id,"Users")
+                        ensure_headers(ws_u,["USE","Tài khoản (USE\\username)","Họ tên","Email",
+                                             "Mật khẩu_băm","Vai trò","Kích hoạt"])
+                        df_u = ws_to_df(ws_u)
+                        if df_u.empty:
+                            df_u=pd.DataFrame(columns=["USE","Tài khoản (USE\\username)","Họ tên",
+                                                       "Email","Mật khẩu_băm","Vai trò","Kích hoạt"])
+                        add=[]
+                        for _,r in df_src.iterrows():
+                            unit=str(r.get("Tên đơn vị",""))
+                            acc=str(r.get("USE (mã đăng nhập)","")).strip()
+                            pw=str(r.get("Mật khẩu mặc định","123456"))
+                            if not acc: continue
+                            role="admin" if unit.lower()=="admin" else "user"
+                            if (df_u["Tài khoản (USE\\username)"].astype(str)==acc).any():
+                                df_u.loc[df_u["Tài khoản (USE\\username)"].astype(str)==acc,
+                                         ["USE","Mật khẩu_băm","Vai trò","Kích hoạt"]]=[
+                                             acc.split("\\")[0],hash_pw(pw),role,"1"]
+                            else:
+                                add.append({"USE":acc.split("\\")[0],
+                                            "Tài khoản (USE\\username)":acc,
+                                            "Họ tên":"","Email":"",
+                                            "Mật khẩu_băm":hash_pw(pw),
+                                            "Vai trò":role,"Kích hoạt":"1"})
+                        if add: df_u=pd.concat([df_u,pd.DataFrame(add)],ignore_index=True)
+                        df_to_ws(ws_u,df_u); st.success(f"Đồng bộ xong {len(df_u)} tài khoản")
+            else:
+                st.session_state.connected = False
+                st.session_state.client_err = client_err
+                st.error(client_err)
+
 
 # =========================
 # Stop nếu chưa login
 # =========================
 if not st.session_state.get("is_auth"):
     st.info("Hãy đăng nhập hoặc đồng bộ Users trước")
-    st.stop()
+else:
+    use_login=st.session_state.get("auth_use","")
+    st.success(f"Xin chào {st.session_state.get('auth_acc')} — USE: {use_login}")
 
-use_login=st.session_state.get("auth_use","")
-st.success(f"Xin chào {st.session_state.get('auth_acc')} — USE: {use_login}")
+    # =========================
+    # Đổi mật khẩu / Quên mật khẩu
+    # =========================
+    old_pw,new_pw,new_pw2=st.columns(3)
+    with old_pw: op=st.text_input("Mật khẩu hiện tại",type="password")
+    with new_pw: np=st.text_input("Mật khẩu mới",type="password")
+    with new_pw2: np2=st.text_input("Xác nhận",type="password")
+    if st.button("Đổi mật khẩu"):
+        ws=open_ws(spreadsheet_id,"Users");
+        if ws:
+            df=ws_to_df(ws);acc=st.session_state["auth_acc"]
+            row=df[df["Tài khoản (USE\\username)"].astype(str)==acc]
+            if row.empty: st.error("Không tìm thấy acc")
+            elif not verify_pw(op,row.iloc[0]["Mật khẩu_băm"]): st.error("Sai mật khẩu hiện tại")
+            elif np!=np2: st.error("Không khớp")
+            else:
+                df.loc[df["Tài khoản (USE\\username)"].astype(str)==acc,"Mật khẩu_băm"]=hash_pw(np)
+                df_to_ws(ws,df);st.success("Đổi thành công")
 
-# =========================
-# Đổi mật khẩu / Quên mật khẩu
-# =========================
-old_pw,new_pw,new_pw2=st.columns(3)
-with old_pw: op=st.text_input("Mật khẩu hiện tại",type="password")
-with new_pw: np=st.text_input("Mật khẩu mới",type="password")
-with new_pw2: np2=st.text_input("Xác nhận",type="password")
-if st.button("Đổi mật khẩu"):
-    ws=open_ws(spreadsheet_id,"Users");df=ws_to_df(ws);acc=st.session_state["auth_acc"]
-    row=df[df["Tài khoản (USE\\username)"].astype(str)==acc]
-    if row.empty: st.error("Không tìm thấy acc")
-    elif not verify_pw(op,row.iloc[0]["Mật khẩu_băm"]): st.error("Sai mật khẩu hiện tại")
-    elif np!=np2: st.error("Không khớp")
-    else:
-        df.loc[df["Tài khoản (USE\\username)"].astype(str)==acc,"Mật khẩu_băm"]=hash_pw(np)
-        df_to_ws(ws,df);st.success("Đổi thành công")
+    acc_f=st.text_input("Tài khoản cần cấp mật khẩu tạm")
+    if st.button("Cấp mật khẩu tạm"):
+        ws=open_ws(spreadsheet_id,"Users")
+        if ws:
+            df=ws_to_df(ws)
+            if (df["Tài khoản (USE\\username)"].astype(str)==acc_f).any():
+                tmp=uuid.uuid4().hex[:8]
+                df.loc[df["Tài khoản (USE\\username)"].astype(str)==acc_f,
+                       ["Mật khẩu_băm","Kích hoạt"]]=[hash_pw(tmp),"1"]
+                df_to_ws(ws,df)
+                wslog=open_ws(spreadsheet_id,"ResetRequests")
+                ensure_headers(wslog,["USE","Tài khoản","Thời điểm","Trạng thái","Ghi chú"])
+                log=ws_to_df(wslog)
+                use_acc=df.loc[df["Tài khoản (USE\\username)"].astype(str)==acc_f,"USE"].iloc[0]
+                log=pd.concat([log,pd.DataFrame([{"USE":use_acc,"Tài khoản":acc_f,
+                                                  "Thời điểm":datetime.now().isoformat(timespec='seconds'),
+                                                  "Trạng thái":"Cấp mật khẩu tạm","Ghi chú":"User yêu cầu"}])],
+                              ignore_index=True)
+                df_to_ws(wslog,log)
+                st.success(f"Mật khẩu tạm: {tmp}")
+            else: st.error("Không tồn tại")
 
-acc_f=st.text_input("Tài khoản cần cấp mật khẩu tạm")
-if st.button("Cấp mật khẩu tạm"):
-    ws=open_ws(spreadsheet_id,"Users");df=ws_to_df(ws)
-    if (df["Tài khoản (USE\\username)"].astype(str)==acc_f).any():
-        tmp=uuid.uuid4().hex[:8]
-        df.loc[df["Tài khoản (USE\\username)"].astype(str)==acc_f,
-               ["Mật khẩu_băm","Kích hoạt"]]=[hash_pw(tmp),"1"]
-        df_to_ws(ws,df)
-        wslog=open_ws(spreadsheet_id,"ResetRequests")
-        ensure_headers(wslog,["USE","Tài khoản","Thời điểm","Trạng thái","Ghi chú"])
-        log=ws_to_df(wslog)
-        use_acc=df.loc[df["Tài khoản (USE\\username)"].astype(str)==acc_f,"USE"].iloc[0]
-        log=pd.concat([log,pd.DataFrame([{"USE":use_acc,"Tài khoản":acc_f,
-                                          "Thời điểm":datetime.now().isoformat(timespec='seconds'),
-                                          "Trạng thái":"Cấp mật khẩu tạm","Ghi chú":"User yêu cầu"}])],
-                      ignore_index=True)
-        df_to_ws(wslog,log)
-        st.success(f"Mật khẩu tạm: {tmp}")
-    else: st.error("Không tồn tại")
+    # =========================
+    # Nhập KPI + Ghi KPI_DB
+    # =========================
+    up=st.file_uploader("Chọn CSV/XLSX")
+    if up is not None:
+        df_in=pd.read_csv(up) if up.name.endswith(".csv") else pd.read_excel(up)
+        st.dataframe(df_in)
+        st.session_state["kpi_df"]=df_in
 
-# =========================
-# Nhập KPI + Ghi KPI_DB
-# =========================
-up=st.file_uploader("Chọn CSV/XLSX")
-if up is not None:
-    df_in=pd.read_csv(up) if up.name.endswith(".csv") else pd.read_excel(up)
-    st.dataframe(df_in)
-    st.session_state["kpi_df"]=df_in
+    thang=st.number_input("Tháng",1,12,datetime.now().month)
+    nam=st.number_input("Năm",2000,2100,datetime.now().year)
 
-thang=st.number_input("Tháng",1,12,datetime.now().month)
-nam=st.number_input("Năm",2000,2100,datetime.now().year)
+    def compute_point(r):
+        try:
+            kh=float(r.get("Kế hoạch",0));th=float(r.get("Thực hiện",0));ts=float(r.get("Trọng số",0))
+            tile=th/kh*100 if kh else 0
+            return max(0,min(100,tile))*(ts/100)
+        except: return 0
 
-def compute_point(r):
-    try:
-        kh=float(r.get("Kế hoạch",0));th=float(r.get("Thực hiện",0));ts=float(r.get("Trọng số",0))
-        tile=th/kh*100 if kh else 0
-        return max(0,min(100,tile))*(ts/100)
-    except: return 0
+    if st.button("💾 Ghi KPI_DB"):
+        ws=open_ws(spreadsheet_id,"KPI_DB")
+        if ws:
+            cols=["USE","Đơn vị","Bộ phận/người phụ trách","Tên chỉ tiêu (KPI)","Đơn vị tính",
+                  "Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm","CreatedAt","UpdatedAt"]
+            ensure_headers(ws,cols);cur=ws_to_df(ws)
+            df=st.session_state.get("kpi_df");df["Điểm KPI"]=df.apply(compute_point,axis=1)
+            df["USE"],df["Đơn vị"],df["Tháng"],df["Năm"]=use_login,"",int(thang),int(nam)
+            now=datetime.now().isoformat(timespec='seconds');df["CreatedAt"],df["UpdatedAt"]=now,now
+            out=pd.concat([cur,df[cols]],ignore_index=True);df_to_ws(ws,out)
+            st.success("Đã ghi")
 
-if st.button("💾 Ghi KPI_DB"):
-    ws=open_ws(spreadsheet_id,"KPI_DB")
-    cols=["USE","Đơn vị","Bộ phận/người phụ trách","Tên chỉ tiêu (KPI)","Đơn vị tính",
-          "Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm","CreatedAt","UpdatedAt"]
-    ensure_headers(ws,cols);cur=ws_to_df(ws)
-    df=st.session_state.get("kpi_df");df["Điểm KPI"]=df.apply(compute_point,axis=1)
-    df["USE"],df["Đơn vị"],df["Tháng"],df["Năm"]=use_login,"",int(thang),int(nam)
-    now=datetime.now().isoformat(timespec='seconds');df["CreatedAt"],df["UpdatedAt"]=now,now
-    out=pd.concat([cur,df[cols]],ignore_index=True);df_to_ws(ws,out)
-    st.success("Đã ghi")
+    # =========================
+    # Báo cáo
+    # =========================
+    if st.button("Xuất báo cáo Excel"):
+        ws=open_ws(spreadsheet_id,"KPI_DB")
+        if ws:
+            df=ws_to_df(ws)
+            for c in ["Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm"]:
+                if c in df.columns: df[c]=pd.to_numeric(df[c],errors="coerce")
+            cur=df[(df["USE"]==use_login)&(df["Tháng"]==int(thang))&(df["Năm"]==int(nam))]
+            prev=df[(df["USE"]==use_login)&(df["Năm"]==int(nam))&(df["Tháng"]==int(thang)-1)] if int(thang)>1 else pd.DataFrame()
+            yoy=df[(df["USE"]==use_login)&(df["Tháng"]==int(thang))&(df["Năm"]==int(nam)-1)]
+            def agg(d):
+                if d.empty: return pd.DataFrame(columns=["Bộ phận","Tổng TS","Tổng điểm","% hoàn thành"])
+                g=d.groupby("Bộ phận/người phụ trách").agg(**{"Tổng TS":("Trọng số","sum"),
+                                                              "Tổng điểm":("Điểm KPI","sum")}).reset_index()
+                g["% hoàn thành"]=g.apply(lambda r:(r["Tổng điểm"]/r["Tổng TS"]*100) if r["Tổng TS"] else 0,axis=1);return g
+            cur_g,prev_g,yoy_g=agg(cur),agg(prev),agg(yoy)
+            out=BytesIO()
+            with pd.ExcelWriter(out,engine="xlsxwriter") as w:
+                cur_g.to_excel(w,index=False,sheet_name="Thang_hien_tai")
+                if not prev_g.empty: prev_g.to_excel(w,index=False,sheet_name="So_thang_truoc")
+                if not yoy_g.empty: yoy_g.to_excel(w,index=False,sheet_name="So_cung_ky")
+            st.download_button("Tải báo cáo",out.getvalue(),
+                               file_name=f"Bao_cao_{use_login}_{nam}_{thang:02d}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# =========================
-# Báo cáo
-# =========================
-if st.button("Xuất báo cáo Excel"):
-    ws=open_ws(spreadsheet_id,"KPI_DB");df=ws_to_df(ws)
-    for c in ["Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm"]:
-        if c in df.columns: df[c]=pd.to_numeric(df[c],errors="coerce")
-    cur=df[(df["USE"]==use_login)&(df["Tháng"]==int(thang))&(df["Năm"]==int(nam))]
-    prev=df[(df["USE"]==use_login)&(df["Năm"]==int(nam))&(df["Tháng"]==int(thang)-1)] if int(thang)>1 else pd.DataFrame()
-    yoy=df[(df["USE"]==use_login)&(df["Tháng"]==int(thang))&(df["Năm"]==int(nam)-1)]
-    def agg(d):
-        if d.empty: return pd.DataFrame(columns=["Bộ phận","Tổng TS","Tổng điểm","% hoàn thành"])
-        g=d.groupby("Bộ phận/người phụ trách").agg(**{"Tổng TS":("Trọng số","sum"),
-                                                      "Tổng điểm":("Điểm KPI","sum")}).reset_index()
-        g["% hoàn thành"]=g.apply(lambda r:(r["Tổng điểm"]/r["Tổng TS"]*100) if r["Tổng TS"] else 0,axis=1);return g
-    cur_g,prev_g,yoy_g=agg(cur),agg(prev),agg(yoy)
-    out=BytesIO()
-    with pd.ExcelWriter(out,engine="xlsxwriter") as w:
-        cur_g.to_excel(w,index=False,sheet_name="Thang_hien_tai")
-        if not prev_g.empty: prev_g.to_excel(w,index=False,sheet_name="So_thang_truoc")
-        if not yoy_g.empty: yoy_g.to_excel(w,index=False,sheet_name="So_cung_ky")
-    st.download_button("Tải báo cáo",out.getvalue(),
-                       file_name=f"Bao_cao_{use_login}_{nam}_{thang:02d}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-# =========================
-# Admin compare
-# =========================
-if st.session_state.get("role")=="admin":
-    st.subheader("📈 So sánh KPI các đơn vị")
-    ws=open_ws(spreadsheet_id,"KPI_DB");df=ws_to_df(ws)
-    if not df.empty:
-        df["Điểm KPI"]=pd.to_numeric(df["Điểm KPI"],errors="coerce")
-        ranking=df.groupby(["USE","Tháng","Năm"]).agg({"Điểm KPI":"sum"}).reset_index()
-        st.dataframe(ranking.sort_values(["Năm","Tháng","Điểm KPI"],ascending=[False,False,False]))
+    # =========================
+    # Admin compare
+    # =========================
+    if st.session_state.get("role")=="admin":
+        st.subheader("📈 So sánh KPI các đơn vị")
+        ws=open_ws(spreadsheet_id,"KPI_DB")
+        if ws:
+            df=ws_to_df(ws)
+            if not df.empty:
+                df["Điểm KPI"]=pd.to_numeric(df["Điểm KPI"],errors="coerce")
+                ranking=df.groupby(["USE","Tháng","Năm"]).agg({"Điểm KPI":"sum"}).reset_index()
+                st.dataframe(ranking.sort_values(["Năm","Tháng","Điểm KPI"],ascending=[False,False,False]))
 
