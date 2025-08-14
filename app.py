@@ -395,12 +395,19 @@ edited_temp = st.data_editor(
     num_rows="fixed",
 )
 
-# ✅ CẬP NHẬT LẠI state lựa chọn sau mỗi lần rerun
+# ✅ SỬA LỖI: CẬP NHẬT LẠI state lựa chọn từ kết quả edited_temp một cách cẩn thận
 if not edited_temp.empty:
     try:
-        for _id, _chon in zip(edited_temp["__row_id"].tolist(), edited_temp["Chọn"].tolist()):
-            st.session_state.temp_selected[_id] = bool(_chon)
+        # Lấy danh sách ID hiện tại
+        current_ids = edited_temp["__row_id"].tolist()
+        # Tạo một dictionary mới để lưu trạng thái
+        new_sel_map = {}
+        for _id, _chon in zip(current_ids, edited_temp["Chọn"].tolist()):
+            new_sel_map[_id] = bool(_chon)
+        # Thay thế toàn bộ state cũ bằng state mới
+        st.session_state.temp_selected = new_sel_map
     except Exception:
+        # Trong trường hợp có lỗi, giữ lại trạng thái cũ
         pass
 
 colSel1, colSel2, colSel3 = st.columns([1,1,2])
