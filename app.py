@@ -357,6 +357,23 @@ st.markdown("**Bảng tạm (tick cột *Chọn* rồi nhấn ▶ Nạp dòng đ
 if st.session_state.temp_kpi_df.empty:
     st.info("Bảng tạm chưa có dữ liệu.")
 else:
+
+# ✅ Ép kiểu cột 'Chọn' về bool để tick được trong Data Editor
+if "Chọn" not in st.session_state.temp_kpi_df.columns:
+    st.session_state.temp_kpi_df.insert(0, "Chọn", False)
+def __to_bool(v):
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return bool(int(v))
+    if isinstance(v, str):
+        t = v.strip().lower()
+        return t in ("true","1","x","yes","y","checked")
+    return False
+st.session_state.temp_kpi_df["Chọn"] = st.session_state.temp_kpi_df["Chọn"].map(__to_bool)
+st.session_state.temp_kpi_df["Chọn"] = st.session_state.temp_kpi_df["Chọn"].fillna(False)
     # Cấu hình cột: chỉ cho phép tick "Chọn", các cột còn lại khóa lại
     colcfg = {
         "Chọn": st.column_config.CheckboxColumn(
