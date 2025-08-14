@@ -4,8 +4,8 @@ import pandas as pd
 from datetime import datetime
 from io import BytesIO
 import base64
-import re
 import os
+import unicodedata
 
 # =============================
 # CẤU HÌNH TRANG
@@ -163,17 +163,14 @@ def read_service_account_from_secrets():
             raise RuntimeError("Không tìm thấy google_service_account hoặc gdrive_service_account trong secrets.") from e
     conf = dict(conf)
     if "private_key" in conf and conf["private_key"]:
-        # FIX: thay '
-' bằng xuống dòng thật (handle cả dạng đã bị escape)
-        pk = str(conf["private_key"])  
-        conf["private_key"] = pk.replace("\n", "
-")
+        # FIX: thay '\n' bằng xuống dòng thật (handle cả dạng đã bị escape)
+        pk = str(conf["private_key"])
+        conf["private_key"] = pk.replace("\\n", "\n")
         return conf
     if "private_key_b64" in conf and conf["private_key_b64"]:
         import base64
         decoded = base64.b64decode(conf["private_key_b64"]).decode("utf-8")
-        conf["private_key"] = decoded.replace("\n", "
-")
+        conf["private_key"] = decoded.replace("\\n", "\n")
         return conf
     raise RuntimeError("Secrets thiếu private_key hoặc private_key_b64.")
 
@@ -227,10 +224,8 @@ with st.sidebar:
     spreadsheet_id = st.text_input(
         "Spreadsheet ID",
         help=(
-            "Dán ID của Google Sheets. Ví dụ từ URL:
-"
-            "https://docs.google.com/spreadsheets/d/1AbCdEfGh.../edit#gid=0
-"
+            "Dán ID của Google Sheets. Ví dụ từ URL:\n"
+            "https://docs.google.com/spreadsheets/d/1AbCdEfGh.../edit#gid=0\n"
             "=> Spreadsheet ID là phần giữa /d/ và /edit"
         ),
     )
@@ -461,8 +456,6 @@ with colSel3:
 # =============================
 # Phần này giữ lại khả năng nạp file KPI_Input (Excel/CSV) và tính điểm tự động ngay trong bảng,
 # giúp anh xử lý nhanh một tháng dữ liệu độc lập (không đụng đến bảng tạm ở trên).
-
-import unicodedata
 
 def _norm_text(s: str) -> str:
     if not isinstance(s, str):
