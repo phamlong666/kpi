@@ -351,7 +351,7 @@ df_manual = pd.DataFrame(st.session_state.kpi_rows, columns=EXPECTED_KPI_COLS) i
 
 st.markdown("**Bảng tạm (tick cột *Chọn* rồi nhấn ▶ Nạp dòng đã chọn lên Form):**")
 
-# ✅ Tạo __row_id ổn định để lưu trạng thái chọn
+# ✅ Cải thiện logic xử lý checkbox để tích chọn hoạt động ổn định
 if not df_manual.empty:
     df_manual["__row_id"] = (
         df_manual["Tên chỉ tiêu (KPI)"].astype(str).fillna("") + "|" +
@@ -360,16 +360,8 @@ if not df_manual.empty:
         df_manual["Tháng"].astype(str).fillna("") + "|" +
         df_manual["Năm"].astype(str).fillna("")
     )
-else:
-    df_manual["__row_id"] = []
-
-# ✅ Dựng cột "Chọn" từ state, để tick không bị mất khi app rerun
-sel_map = st.session_state.get("temp_selected", {})
-chons = [bool(sel_map.get(i, False)) for i in df_manual["__row_id"].tolist()]
-
-# Tạo DataFrame hiển thị, sử dụng list of booleans cho cột 'Chọn'
-df_display = df_manual.copy()
-df_display.insert(0, "Chọn", chons)
+    # Thêm cột "Chọn" vào DataFrame để hiển thị trong editor
+    df_manual.insert(0, "Chọn", [st.session_state.temp_selected.get(i, False) for i in df_manual["__row_id"].tolist()])
 
 # Cấu hình cột: chỉ cho phép tick "Chọn", các cột còn lại khóa lại
 colcfg = {
@@ -389,7 +381,7 @@ colcfg = {
 }
 
 edited_temp = st.data_editor(
-    df_display,
+    df_manual,
     key="temp_table_editor",
     use_container_width=True,
     hide_index=True,
@@ -398,19 +390,15 @@ edited_temp = st.data_editor(
 )
 
 # ✅ SỬA LỖI: CẬP NHẬT LẠI state lựa chọn từ kết quả edited_temp một cách cẩn thận
-if not edited_temp.empty:
+if not edited_temp.empty and "Chọn" in edited_temp.columns and "__row_id" in edited_temp.columns:
     try:
-        # Lấy danh sách ID hiện tại
-        current_ids = edited_temp["__row_id"].tolist()
-        # Tạo một dictionary mới để lưu trạng thái
-        new_sel_map = {}
-        for _id, _chon in zip(current_ids, edited_temp["Chọn"].tolist()):
-            new_sel_map[_id] = bool(_chon)
-        # Thay thế toàn bộ state cũ bằng state mới
+        # Tạo một dictionary mới để lưu trạng thái từ kết quả đã chỉnh sửa
+        new_sel_map = {row["__row_id"]: bool(row["Chọn"]) for _, row in edited_temp.iterrows()}
+        # Ghi đè toàn bộ state cũ bằng state mới
         st.session_state.temp_selected = new_sel_map
-    except Exception:
-        # Trong trường hợp có lỗi, giữ lại trạng thái cũ
-        pass
+    except Exception as e:
+        # Nếu có lỗi, log ra console để debug, nhưng không làm crash app
+        st.error(f"Lỗi khi cập nhật trạng thái tick chọn: {e}")
 
 colSel1, colSel2, colSel3 = st.columns([1,1,2])
 with colSel1:
@@ -441,7 +429,7 @@ with colSel2:
         else:
             # Xóa khỏi bảng tạm theo __row_id
             keep_mask = ~df_manual["__row_id"].isin(selected_ids)
-            st.session_state.kpi_rows = df_manual[keep_mask].drop(columns=["__row_id"]).to_dict(orient="records")
+            st.session_state.kpi_rows = df_manual[keep_mask].drop(columns=["__row_id", "Chọn"]).to_dict(orient="records")
             # Xóa trạng thái chọn tương ứng
             for k in selected_ids:
                 st.session_state.temp_selected.pop(k, None)
