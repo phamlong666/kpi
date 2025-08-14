@@ -209,9 +209,9 @@ def init_session_state():
     # Google flags
     st.session_state.setdefault("connected", False)
     st.session_state.setdefault("connect_msg", "")
-    # ✅ LƯU TRẠNG THÁI TÍCH CHỌN HÀNG TRONG BẢNG TẠM (để không bị mất khi rerun)
-    # key: __row_id → bool
-    st.session_state.setdefault("temp_selected", {})
+    # ✅ LƯU TRẠNG THÁI BẢNG TẠM VỚI DF
+    if "temp_kpi_df" not in st.session_state:
+        st.session_state.temp_kpi_df = pd.DataFrame(columns=["Chọn"] + EXPECTED_KPI_COLS)
 
 
 # =============================
@@ -269,7 +269,7 @@ st.markdown("---")
 st.markdown('<h2 class="section-title">3) Nhập thủ công KPI & Xuất Excel (9 cột)</h2>', unsafe_allow_html=True)
 
 # ---- 3.a) UPLOAD CSV → ĐỔ VÀO BẢNG TẠM ----
-with st.expander("⬆️ Nạp CSV vào 'Bảng tạm'", expanded=False):
+with st.expander(⬆️ Nạp CSV vào 'Bảng tạm'", expanded=False):
     up_csv = st.file_uploader(
         "Tải file .csv (các cột gợi ý: 'Tên chỉ tiêu (KPI)', 'Đơn vị tính', 'Kế hoạch (tháng)', 'Trọng số', 'Bộ phận/người phụ trách', 'Tháng', 'Năm', 'Thực hiện (tháng)')",
         type=["csv"],
@@ -300,9 +300,11 @@ with st.expander("⬆️ Nạp CSV vào 'Bảng tạm'", expanded=False):
                     "Năm": int(_safe_number(year, datetime.now().year)),
                     "Điểm KPI": score,
                 }
-            added = [_map_row(r) for _, r in df_csv.fillna("").iterrows()]
-            st.session_state.kpi_rows.extend(added)
-            st.success(f"Đã thêm {len(added)} dòng vào Bảng tạm.")
+            added_rows = [_map_row(r) for _, r in df_csv.fillna("").iterrows()]
+            added_df = pd.DataFrame(added_rows, columns=EXPECTED_KPI_COLS)
+            added_df.insert(0, "Chọn", False)
+            st.session_state.temp_kpi_df = pd.concat([st.session_state.temp_kpi_df, added_df], ignore_index=True)
+            st.success(f"Đã thêm {len(added_df)} dòng vào Bảng tạm.")
         except Exception as e:
             st.error(f"Không đọc được CSV: {e}")
 
@@ -331,7 +333,8 @@ with st.form("kpi_input_form", clear_on_submit=False):
         st.metric("9) Điểm KPI (xem trước)", compute_kpi_score_dynamic(st.session_state['ten_kpi'], st.session_state['thuc_hien'], st.session_state['ke_hoach'], st.session_state['trong_so']))
 
     if st.form_submit_button("➕ Thêm vào bảng tạm"):
-        row = {
+        new_row_data = {
+            "Chọn": False,
             "Tên chỉ tiêu (KPI)": st.session_state['ten_kpi'].strip(),
             "Đơn vị tính": st.session_state['dvt'].strip(),
             "Kế hoạch": _safe_number(st.session_state['ke_hoach'], 0.0),
@@ -342,75 +345,57 @@ with st.form("kpi_input_form", clear_on_submit=False):
             "Năm": int(st.session_state['nam']),
             "Điểm KPI": compute_kpi_score_dynamic(st.session_state['ten_kpi'], st.session_state['thuc_hien'], st.session_state['ke_hoach'], st.session_state['trong_so']),
         }
-        st.session_state.kpi_rows.append(row)
+        new_row_df = pd.DataFrame([new_row_data], columns=["Chọn"] + EXPECTED_KPI_COLS)
+        st.session_state.temp_kpi_df = pd.concat([st.session_state.temp_kpi_df, new_row_df], ignore_index=True)
         st.success("Đã thêm 1 dòng KPI vào bảng tạm.")
 
 # ---- 3.c) BẢNG TẠM: CHỌN DÒNG → NẠP LÊN FORM & XUẤT EXCEL ----
-# Tạo DataFrame từ bảng tạm
-df_manual = pd.DataFrame(st.session_state.kpi_rows, columns=EXPECTED_KPI_COLS) if st.session_state.kpi_rows else pd.DataFrame(columns=EXPECTED_KPI_COLS)
-
 st.markdown("**Bảng tạm (tick cột *Chọn* rồi nhấn ▶ Nạp dòng đã chọn lên Form):**")
 
-# ✅ Cải thiện logic xử lý checkbox để tích chọn hoạt động ổn định
-if not df_manual.empty:
-    df_manual["__row_id"] = (
-        df_manual["Tên chỉ tiêu (KPI)"].astype(str).fillna("") + "|" +
-        df_manual["Đơn vị tính"].astype(str).fillna("") + "|" +
-        df_manual["Bộ phận/người phụ trách"].astype(str).fillna("") + "|" +
-        df_manual["Tháng"].astype(str).fillna("") + "|" +
-        df_manual["Năm"].astype(str).fillna("")
+# Xử lý trường hợp DataFrame rỗng
+if st.session_state.temp_kpi_df.empty:
+    st.info("Bảng tạm chưa có dữ liệu.")
+    edited_temp = pd.DataFrame()
+else:
+    # Cấu hình cột: chỉ cho phép tick "Chọn", các cột còn lại khóa lại
+    colcfg = {
+        "Chọn": st.column_config.CheckboxColumn(
+            "Chọn",
+            help="Đánh dấu một dòng để nạp lên Form",
+        ),
+        "Tên chỉ tiêu (KPI)": st.column_config.TextColumn(disabled=True),
+        "Đơn vị tính": st.column_config.TextColumn(disabled=True),
+        "Kế hoạch": st.column_config.NumberColumn(disabled=True),
+        "Thực hiện": st.column_config.NumberColumn(disabled=True),
+        "Trọng số": st.column_config.NumberColumn(disabled=True),
+        "Bộ phận/người phụ trách": st.column_config.TextColumn(disabled=True),
+        "Tháng": st.column_config.NumberColumn(disabled=True),
+        "Năm": st.column_config.NumberColumn(disabled=True),
+        "Điểm KPI": st.column_config.NumberColumn(format="%.4f", disabled=True),
+    }
+
+    # Hiển thị data_editor và lưu kết quả vào session state
+    edited_temp = st.data_editor(
+        st.session_state.temp_kpi_df,
+        key="temp_table_editor",
+        use_container_width=True,
+        hide_index=True,
+        column_config=colcfg,
+        num_rows="fixed",
     )
-    # Thêm cột "Chọn" vào DataFrame để hiển thị trong editor
-    df_manual.insert(0, "Chọn", [st.session_state.temp_selected.get(i, False) for i in df_manual["__row_id"].tolist()])
+    # Ghi đè DataFrame trong session state bằng kết quả đã chỉnh sửa
+    st.session_state.temp_kpi_df = edited_temp.copy()
 
-# Cấu hình cột: chỉ cho phép tick "Chọn", các cột còn lại khóa lại
-colcfg = {
-    "Chọn": st.column_config.CheckboxColumn(
-        "Chọn",
-        help="Đánh dấu một dòng để nạp lên Form",
-    ),
-    "Tên chỉ tiêu (KPI)": st.column_config.TextColumn(disabled=True),
-    "Đơn vị tính": st.column_config.TextColumn(disabled=True),
-    "Kế hoạch": st.column_config.NumberColumn(disabled=True),
-    "Thực hiện": st.column_config.NumberColumn(disabled=True),
-    "Trọng số": st.column_config.NumberColumn(disabled=True),
-    "Bộ phận/người phụ trách": st.column_config.TextColumn(disabled=True),
-    "Tháng": st.column_config.NumberColumn(disabled=True),
-    "Năm": st.column_config.NumberColumn(disabled=True),
-    "Điểm KPI": st.column_config.NumberColumn(format="%.4f", disabled=True),
-}
-
-edited_temp = st.data_editor(
-    df_manual,
-    key="temp_table_editor",
-    use_container_width=True,
-    hide_index=True,
-    column_config=colcfg,
-    num_rows="fixed",
-)
-
-# ✅ SỬA LỖI: CẬP NHẬT LẠI state lựa chọn từ kết quả edited_temp một cách cẩn thận
-if not edited_temp.empty and "Chọn" in edited_temp.columns and "__row_id" in edited_temp.columns:
-    try:
-        # Tạo một dictionary mới để lưu trạng thái từ kết quả đã chỉnh sửa
-        new_sel_map = {row["__row_id"]: bool(row["Chọn"]) for _, row in edited_temp.iterrows()}
-        # Ghi đè toàn bộ state cũ bằng state mới
-        st.session_state.temp_selected = new_sel_map
-    except Exception as e:
-        # Nếu có lỗi, log ra console để debug, nhưng không làm crash app
-        st.error(f"Lỗi khi cập nhật trạng thái tick chọn: {e}")
 
 colSel1, colSel2, colSel3 = st.columns([1,1,2])
 with colSel1:
     if st.button("▶ Nạp dòng đã chọn lên Form"):
-        # Lấy danh sách id đã chọn từ state (bền vững)
-        selected_ids = [k for k, v in st.session_state.temp_selected.items() if v]
-        if not selected_ids:
+        selected_rows = st.session_state.temp_kpi_df[st.session_state.temp_kpi_df["Chọn"] == True]
+        if selected_rows.empty:
             st.warning("Chưa chọn dòng nào (tick vào cột 'Chọn').")
         else:
             # Ưu tiên dòng cuối cùng vừa tick
-            sel_id = selected_ids[-1]
-            r = df_manual[df_manual["__row_id"] == sel_id].iloc[0]
+            r = selected_rows.iloc[-1]
             # Gán lên form
             st.session_state['ten_kpi'] = str(r["Tên chỉ tiêu (KPI)"])
             st.session_state['dvt'] = str(r["Đơn vị tính"]) or ""
@@ -423,23 +408,22 @@ with colSel1:
             st.success("Đã nạp dòng đã chọn lên Form. Anh chỉnh 'Thực hiện' để ra điểm KPI.")
 with colSel2:
     if st.button("🗑️ Xóa dòng tick chọn"):
-        selected_ids = [k for k, v in st.session_state.temp_selected.items() if v]
-        if not selected_ids:
-            st.info("Chưa tick chọn dòng nào.")
+        if st.session_state.temp_kpi_df.empty:
+            st.info("Bảng tạm chưa có dữ liệu.")
         else:
-            # Xóa khỏi bảng tạm theo __row_id
-            keep_mask = ~df_manual["__row_id"].isin(selected_ids)
-            st.session_state.kpi_rows = df_manual[keep_mask].drop(columns=["__row_id", "Chọn"]).to_dict(orient="records")
-            # Xóa trạng thái chọn tương ứng
-            for k in selected_ids:
-                st.session_state.temp_selected.pop(k, None)
-            st.success(f"Đã xóa {len(selected_ids)} dòng khỏi Bảng tạm.")
+            selected_rows_count = len(st.session_state.temp_kpi_df[st.session_state.temp_kpi_df["Chọn"] == True])
+            if selected_rows_count == 0:
+                st.info("Chưa tick chọn dòng nào.")
+            else:
+                st.session_state.temp_kpi_df = st.session_state.temp_kpi_df[st.session_state.temp_kpi_df["Chọn"] == False].reset_index(drop=True)
+                st.success(f"Đã xóa {selected_rows_count} dòng khỏi Bảng tạm.")
 with colSel3:
     if st.button("💾 Xuất Excel (Bảng tạm)"):
-        if len(st.session_state.kpi_rows) == 0:
+        if st.session_state.temp_kpi_df.empty:
             st.error("Chưa có dữ liệu để xuất.")
         else:
-            out_df = pd.DataFrame(st.session_state.kpi_rows, columns=EXPECTED_KPI_COLS)
+            # Drop cột 'Chọn' trước khi xuất
+            out_df = st.session_state.temp_kpi_df.drop(columns=["Chọn"], errors="ignore")
             bin_data = export_dataframe_to_excel(out_df)
             file_name = f"KPI_Scorer_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             st.download_button(
