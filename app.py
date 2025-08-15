@@ -1,7 +1,4 @@
-# Write a CLEAN app.py (no Path.write_text anywhere inside the file).
-from pathlib import Path
-
-clean_code = r'''# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 KPI App – Định Hóa (CLEAN, no self-writing)
 - Đăng nhập bằng USE từ tab USE của Google Sheet (hỗ trợ alias cột).
@@ -512,8 +509,3 @@ with tab2:
                 st.error(f"Lưu thất bại: {e}")
     else:
         st.caption("Chưa tải CSV.")
-'''
-
-# Save clean file
-Path("/mnt/data/app.py").write_text(clean_code, encoding="utf-8")
-print("Clean full app.py written. Size: {:.1f} KB".format(Path('/mnt/data/app.py').stat().st_size/1024))
