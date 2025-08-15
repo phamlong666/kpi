@@ -31,15 +31,18 @@ st.title("📊 KPI - Đội quản lý Điện lực khu vực Định Hóa")
 # Helpers: Password hash
 # =========================
 def hash_pw(p: str) -> str:
+    """Hashes a password using SHA-256."""
     return hashlib.sha256((p or "").encode()).hexdigest()
 
 def verify_pw(plain: str, hashed: str) -> bool:
+    """Verifies a plain password against a hashed one."""
     return hash_pw(plain) == str(hashed)
 
 # =========================
 # Loader Google SA (multi-mode) + Client SAFE
 # =========================
 def _from_plain_block():
+    """Tries to load service account credentials from a plain JSON block."""
     try:
         sa = dict(st.secrets["gdrive_service_account"])
         if "private_key_b64" in st.secrets["gdrive_service_account"]:
@@ -52,7 +55,10 @@ def _from_plain_block():
         return None
 
 def load_sa_from_secret():
-    """Ưu tiên Fernet (fernet_key + gsa_enc), fallback JSON / base64. Không raise, chỉ trả None nếu thiếu."""
+    """
+    Ưu tiên Fernet (fernet_key + gsa_enc), fallback JSON / base64.
+    Không raise, chỉ trả None nếu thiếu.
+    """
     # Thử Fernet nếu có
     try:
         gsa_enc_b64 = st.secrets.get("gsa_enc")
@@ -73,6 +79,10 @@ def load_sa_from_secret():
     return None, "none"
 
 def get_client_safe():
+    """
+    Loads service account credentials and creates a gspread client.
+    Handles different loading modes and potential errors.
+    """
     sa_dict, mode = load_sa_from_secret()
     if not sa_dict:
         return None, mode, "Thiếu secrets (fernet_key+gsa_enc) hoặc [gdrive_service_account]."
@@ -106,6 +116,10 @@ elif st.session_state.sa_mode == "fernet":
 # Sheet helpers
 # =========================
 def open_ws(spreadsheet_id, sheet_name):
+    """
+    Opens a worksheet from a given spreadsheet ID and sheet name.
+    Includes more specific error handling.
+    """
     if st.session_state.client is None:
         st.error("Client chưa được kết nối.")
         return None
@@ -113,13 +127,20 @@ def open_ws(spreadsheet_id, sheet_name):
         sh = st.session_state.client.open_by_key(spreadsheet_id)
         return sh.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
-        st.error(f"Sheet '{sheet_name}' không tồn tại. Vui lòng tạo sheet này trong Google Sheet.")
+        st.error(f"Lỗi: Sheet '{sheet_name}' không tồn tại. Vui lòng kiểm tra lại tên sheet trong Google Sheet.")
+        return None
+    except gspread.exceptions.APIError as e:
+        if e.response.status_code == 404:
+            st.error(f"Lỗi: Không thể tìm thấy Spreadsheet với ID '{spreadsheet_id}'. Vui lòng kiểm tra lại ID.")
+        else:
+            st.error(f"Lỗi API Google: {e}")
         return None
     except Exception as e:
         st.error(f"Lỗi khi mở sheet: {e}")
         return None
 
 def ensure_headers(ws, headers):
+    """Ensures a worksheet has the correct headers."""
     try:
         cur = ws.row_values(1)
     except:
@@ -128,11 +149,13 @@ def ensure_headers(ws, headers):
         ws.clear(); ws.append_row(headers, value_input_option="RAW")
 
 def ws_to_df(ws):
+    """Converts a worksheet to a pandas DataFrame."""
     rows = ws.get_all_values()
     if not rows: return pd.DataFrame()
     return pd.DataFrame(rows[1:], columns=rows[0])
 
 def df_to_ws(ws, df):
+    """Converts a pandas DataFrame to a worksheet."""
     ws.clear(); ws.append_row(list(df.columns), value_input_option="RAW")
     if not df.empty:
         ws.append_rows(df.astype(str).values.tolist(), value_input_option="RAW")
@@ -352,3 +375,4 @@ else:
                 df["Điểm KPI"]=pd.to_numeric(df["Điểm KPI"],errors="coerce")
                 ranking=df.groupby(["USE","Tháng","Năm"]).agg({"Điểm KPI":"sum"}).reset_index()
                 st.dataframe(ranking.sort_values(["Năm","Tháng","Điểm KPI"],ascending=[False,False,False]))
+
