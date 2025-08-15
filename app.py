@@ -1,13 +1,11 @@
-from pathlib import Path
-
-FINAL_APP = r'''# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v2.3 FINAL)
+KPI App – Định Hóa (v2.3 CLEAN)
 - Đăng nhập bắt buộc: sau khi đăng nhập ẩn hẳn form, chỉ còn lời chào + nút Đăng xuất.
 - Quên mật khẩu: sinh MK tạm 10 ký tự -> cập nhật Google Sheet (tab USE, cột "Mật khẩu mặc định") -> gửi email tới phamlong666@gmail.com.
 - Đổi mật khẩu: chính chủ (có MK cũ) hoặc Admin (không cần MK cũ) -> cập nhật Google Sheet -> gửi email xác nhận.
-- KPI: Bảng KPI (lọc, export), Nhập CSV vào KPI, Quản trị.
-- Đã xử lý so khớp USE không phân biệt hoa/thường, bỏ khoảng trắng thừa.
+- KPI: Bảng KPI (lọc, export), Nhập CSV vào KPI.
+- So khớp USE không phân biệt hoa/thường, bỏ khoảng trắng thừa.
 """
 import re
 import io
@@ -288,7 +286,7 @@ with st.sidebar:
             toast("Đã đăng xuất.", "✅")
             st.experimental_rerun()
 
-        # Quản trị nhanh (cấu hình Sheet) chỉ hiển thị khi đã đăng nhập
+        # Quản trị nhanh (cấu hình Sheet)
         st.markdown("---")
         st.header("⚙️ Cấu hình Sheet")
         sid_val = st.text_input("Google Sheet ID/URL", value=st.session_state.get("spreadsheet_id",""))
@@ -480,7 +478,3 @@ with tab2:
                 if ok: toast("Đã ghi dữ liệu CSV vào sheet KPI.", "✅")
             except Exception as e:
                 st.error(f"Lưu thất bại: {e}")
-'''
-
-Path("/mnt/data/app.py").write_text(FINAL_APP, encoding="utf-8")
-print("Wrote FINAL app.py v2.3 (~{} KB)".format(round(len(FINAL_APP.encode('utf-8'))/1024,1)))
