@@ -80,11 +80,11 @@ def get_gs_client():
 def open_spreadsheet(sid_or_url: str):
     sid = extract_sheet_id(sid_or_url)
     if not sid:
-        raise ValueError("Chưa nhập Spreadsheet ID/URL.")
+        raise ValueError("missing_sid")
     client = st.session_state.get("_gs_client") or get_gs_client()
     st.session_state["_gs_client"] = client
     if client is None:
-        raise RuntimeError("Không thể khởi tạo kết nối Google Sheets.")
+        raise RuntimeError("no_client")
     return client.open_by_key(sid)
 
 def find_use_worksheet(sh):
@@ -105,7 +105,7 @@ def find_use_worksheet(sh):
                 return ws
         except Exception:
             continue
-    raise gspread.exceptions.WorksheetNotFound("Không tìm thấy sheet USE phù hợp.")
+    raise gspread.exceptions.WorksheetNotFound("no_use")
 
 def get_ws_by_name_or_guess(sh, prefer):
     for name in prefer:
@@ -185,22 +185,36 @@ with st.sidebar:
     year_choice = st.text_input("Năm", value=str(datetime.now().year))
 
 # ==================== ĐĂNG NHẬP & ĐỒNG BỘ ====================
+def toast(msg, icon="ℹ️"):
+    try:
+        st.toast(msg, icon=icon)
+    except Exception:
+        pass  # phòng trường hợp môi trường không hỗ trợ toast
+
 login_msg = ""
 
 def handle_login():
     global login_msg
+    # Bắt buộc có SID trước khi login
+    if not st.session_state.get("spreadsheet_id"):
+        login_msg = "Vui lòng nhập ID/URL Google Sheet trước khi đăng nhập."
+        toast(login_msg, "❗")
+        return False
     try:
         sh = open_spreadsheet(st.session_state["spreadsheet_id"])
         ws = find_use_worksheet(sh)
         df = normalize_columns(df_from_ws(ws))
         for req in ["USE (mã đăng nhập)","Mật khẩu mặc định"]:
             if req not in df.columns:
-                raise ValueError(f"Thiếu cột bắt buộc: {req}")
+                login_msg = f"Thiếu cột bắt buộc: {req}"
+                toast(login_msg, "❗")
+                return False
         u = (username or "").strip()
         p = (password or "").strip()
         row = df.loc[df["USE (mã đăng nhập)"].astype(str).str.strip() == u]
         if row.empty:
             login_msg = "Sai tài khoản hoặc chưa có trong danh sách."
+            toast(login_msg, "❌")
             return False
         pass_ok = str(row["Mật khẩu mặc định"].iloc[0]).strip()
         if p and p == pass_ok:
@@ -208,27 +222,42 @@ def handle_login():
             st.session_state["_username"] = u
             st.session_state["_password"] = p
             login_msg = "Đăng nhập thành công."
+            toast(login_msg, "✅")
             return True
         else:
             login_msg = "Mật khẩu không đúng."
+            toast(login_msg, "❌")
             return False
-    except Exception as e:
-        login_msg = f"Lỗi đăng nhập: {e}"
+    except ValueError as ve:
+        if str(ve) == "missing_sid":
+            login_msg = "Vui lòng nhập ID/URL Google Sheet."
+            toast(login_msg, "❗")
+            return False
+        login_msg = f"Lỗi đăng nhập."
+        toast(login_msg, "❌")
+        return False
+    except Exception:
+        login_msg = "Không thể đăng nhập. Kiểm tra quyền truy cập/ID."
+        toast(login_msg, "❌")
         return False
 
 def handle_logout():
     st.session_state.pop("_user", None)
     st.session_state["_password"] = ""
     st.session_state["_username"] = ""
+    toast("Đã đăng xuất.", "✅")
 
 def handle_sync_users():
+    if "_user" not in st.session_state:
+        toast("Vui lòng đăng nhập trước.", "❗")
+        return
     try:
         sh = open_spreadsheet(st.session_state["spreadsheet_id"])
         ws = find_use_worksheet(sh)
         df = normalize_columns(df_from_ws(ws))
-        st.toast(f"Đã đọc {len(df)} người dùng từ sheet USE.", icon="✅")
-    except Exception as e:
-        st.toast(f"Đồng bộ thất bại: {e}", icon="❌")
+        toast(f"Đã đọc {len(df)} người dùng từ sheet USE.", "✅")
+    except Exception:
+        toast("Đồng bộ thất bại. Kiểm tra ID/quyền truy cập.", "❌")
 
 if login_clicked:
     handle_login()
@@ -239,12 +268,14 @@ if sync_clicked:
 
 # ==================== MAIN ====================
 st.title(APP_TITLE)
-if "_user" in st.session_state:
-    st.success(f"Đang đăng nhập: **{st.session_state['_user']}**")
-elif login_msg:
-    st.error(login_msg)
 
-# Tabs KPI luôn hiển thị, KHÔNG phụ thuộc đăng nhập
+# Ẩn toàn bộ giao diện nghiệp vụ khi CHƯA đăng nhập
+if "_user" not in st.session_state:
+    st.caption("Vui lòng nhập ID/URL Google Sheet và đăng nhập để vào khu vực làm việc.")
+    st.stop()
+
+# --- Từ đây trở xuống chỉ hiển thị SAU khi đăng nhập ---
+
 tab1, tab2, tab3 = st.tabs(["📋 Bảng KPI", "📈 Biểu đồ", "⚙️ Quản trị"])
 
 def load_kpi_df():
@@ -252,14 +283,14 @@ def load_kpi_df():
         sh = open_spreadsheet(st.session_state["spreadsheet_id"])
         ws = get_ws_by_name_or_guess(sh, [st.session_state.get("kpi_sheet_name","KPI"), "KPI", "KPI_Data", "KPIs"])
         if ws is None:
-            st.warning("Chưa tìm thấy sheet KPI. Hãy kiểm tra tên sheet ở sidebar.")
+            toast("Chưa tìm thấy sheet KPI. Kiểm tra tên sheet ở sidebar.", "❗")
             return pd.DataFrame(), []
         df = normalize_columns(df_from_ws(ws))
         df, cols = prepare_kpi_df(df)
         df = filter_by_time(df, month_choice, year_choice)
         return df, cols
-    except Exception as e:
-        st.error(f"Lỗi khi đọc KPI: {e}")
+    except Exception:
+        toast("Lỗi khi đọc KPI. Kiểm tra ID/quyền truy cập.", "❌")
         return pd.DataFrame(), []
 
 with tab1:
@@ -276,7 +307,7 @@ with tab1:
             df_kpi = df_kpi.sort_values(by="Điểm", ascending=False)
         st.dataframe(df_kpi[show_cols] if show_cols else df_kpi, use_container_width=True, hide_index=True)
     else:
-        st.info("Chưa có dữ liệu KPI hoặc chưa kết nối sheet.")
+        st.caption("Chưa có dữ liệu KPI hoặc chưa cấu hình đúng tên sheet.")
 
 with tab2:
     st.subheader("Biểu đồ KPI")
@@ -294,7 +325,7 @@ with tab2:
         ax.set_title(f"{field_y} theo {group_field}")
         st.pyplot(fig)
     else:
-        st.info("Chưa có dữ liệu để vẽ.")
+        st.caption("Chưa có dữ liệu để vẽ.")
 
 with tab3:
     st.subheader("Quản trị / Kiểm tra kết nối")
@@ -304,7 +335,7 @@ with tab3:
             try:
                 sh = open_spreadsheet(st.session_state["spreadsheet_id"])
                 st.success(f"Kết nối OK: {sh.title}")
-            except Exception as e:
-                st.error(f"Lỗi: {e}")
+            except Exception:
+                st.error("Lỗi kết nối. Kiểm tra ID/quyền truy cập.")
     with colq2:
         st.write("Tên sheet KPI hiện tại:", st.session_state.get("kpi_sheet_name","KPI"))
