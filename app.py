@@ -70,7 +70,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     alias = {
-        "USE (mã đăng nhập)": ["USE (mã đăng nhập)", r"Tài khoản (USE\username)", r"Tài khoản (USE\username)",
+        "USE (mã đăng nhập)": ["USE (mã đăng nhập)", r"Tài khoản (USE\\username)", r"Tài khoản (USE\\username)",
                                "Tài khoản (USE/username)", "Tài khoản", "Username"],
         "Mật khẩu mặc định": ["Mật khẩu mặc định","Password mặc định","Password","Mật khẩu","Mat khau mac dinh"],
     }
