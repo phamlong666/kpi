@@ -1,7 +1,6 @@
 streamlit
-gspread
-oauth2client
-cryptography
 pandas
-openpyxl
+gspread
+google-auth
+matplotlib
 xlsxwriter
