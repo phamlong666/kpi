@@ -70,7 +70,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     alias = {
-        "USE (mã đăng nhập)": ["USE (mã đăng nhập)", r"Tài khoản (USE\\username)", r"Tài khoản (USE\\username)",
+        "USE (mã đăng nhập)": ["USE (mã đăng nhập)", r"Tài khoản (USE\\\username)", r"Tài khoản (USE\\\username)",
                                "Tài khoản (USE/username)", "Tài khoản", "Username"],
         "Mật khẩu mặc định": ["Mật khẩu mặc định","Password mặc định","Password","Mật khẩu","Mat khau mac dinh"],
     }
@@ -100,7 +100,7 @@ def load_users(spreadsheet_id_or_url: str = "") -> pd.DataFrame:
                 ws = None
                 for w in sh.worksheets():
                     hdr = [h.strip() for h in w.row_values(1)]
-                    if (("USE (mã đăng nhập)" in hdr) or (r"Tài khoản (USE\\username)" in hdr) or ("Tài khoản (USE/username)" in hdr) or ("Tài khoản" in hdr) or ("Username" in hdr)) and ("Mật khẩu mặc định" in hdr or "Password" in hdr or "Mật khẩu" in hdr):
+                    if (("USE (mã đăng nhập)" in hdr) or (r"Tài khoản (USE\\\username)" in hdr) or ("Tài khoản (USE/username)" in hdr) or ("Tài khoản" in hdr) or ("Username" in hdr)) and ("Mật khẩu mặc định" in hdr or "Password" in hdr or "Mật khẩu" in hdr):
                         ws = w; break
                 if ws is None:
                     st.session_state["_gs_error"] = "NO_USE_TAB"
@@ -145,7 +145,7 @@ def check_credentials(df: pd.DataFrame, use_input: str, pwd_input: str) -> bool:
     df = normalize_columns(df)
     # Xác định cột
     col_use = next((c for c in df.columns if c.strip().lower() in [
-        "tài khoản (use\username)".lower(),
+        "tài khoản (use\\username)".lower(),
         "tài khoản (use/username)".lower(),
         "use (mã đăng nhập)".lower(),
         "tài khoản".lower(), "username".lower()
