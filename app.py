@@ -167,7 +167,7 @@ def open_ws(spreadsheet_id, sheet_name):
                     except Exception:
                         hdr = []
                     hdr = [h.strip() for h in hdr]
-                    if ("Tên đơn vị" in hdr and "Mật khẩu mặc định" in hdr) or                        ("Tài khoản (USE\username)" in hdr and "Mật khẩu mặc định" in hdr) or                        ("USE (mã đăng nhập)" in hdr and "Mật khẩu mặc định" in hdr):
+                    if ("Tên đơn vị" in hdr and "Mật khẩu mặc định" in hdr) or                        (r"Tài khoản (USE\username)" in hdr and "Mật khẩu mặc định" in hdr) or                        ("USE (mã đăng nhập)" in hdr and "Mật khẩu mặc định" in hdr):
                         return ws
             except Exception:
                 pass
