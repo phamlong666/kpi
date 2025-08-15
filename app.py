@@ -1,20 +1,16 @@
-from pathlib import Path
-
-APP_CODE = r'''# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (FULL v2)
+KPI App – Định Hóa (CLEAN v2)
 - Bắt buộc đăng nhập (gate cứng). Sau khi đăng nhập, ẩn form login và hiển thị lời chào.
 - Đăng xuất, Quên mật khẩu (reset 10 ký tự + cập nhật Google Sheet + gửi email tới phamlong666@gmail.com).
 - Thay đổi mật khẩu (cập nhật trực tiếp Google Sheet, gửi mail xác nhận nếu cấu hình email).
 - KPI Tabs: Bảng KPI, Nhập CSV, Quản trị.
 """
-
 import re
 import io
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
 import random
 import string
 import streamlit as st
@@ -40,7 +36,7 @@ def toast(msg, icon="ℹ️"):
         pass
 
 def extract_sheet_id(text: str) -> str:
-    if not text: 
+    if not text:
         return ""
     text = text.strip()
     m = re.search(r"/d/([a-zA-Z0-9-_]+)", text)
@@ -320,7 +316,7 @@ with st.sidebar:
                 toast("Chào mừng bạn vào làm việc, chúc bạn luôn vui vẻ nhé! 🌟", "✅")
 
         if forgot_clicked:
-            u = (st.session_state.get("_user") or "").strip() or st.text_input("Nhập lại USE để cấp MK tạm", key="reenter_use")
+            u = (st.session_state.get("_user") or "").strip() or st.text_input("Nhập USE để cấp MK tạm", key="reenter_use")
             if not u:
                 toast("Nhập USE trước khi bấm 'Quên mật khẩu'.", "❗")
             else:
@@ -455,9 +451,7 @@ with tab2:
             df_csv["Điểm KPI"] = df_csv.apply(compute_score, axis=1)
         st.dataframe(df_csv, use_container_width=True, hide_index=True)
 
-        colA,colB = st.columns(2)
-        with colA:
-            save_clicked = st.button("💾 Ghi vào sheet KPI", use_container_width=True, type="primary")
+        save_clicked = st.button("💾 Ghi vào sheet KPI", use_container_width=True, type="primary")
         if save_clicked:
             try:
                 sh, sheet_name = get_sheet_and_name()
@@ -472,7 +466,3 @@ with tab3:
     st.write("Vai trò:", "Admin" if is_admin(st.session_state.get("_user","")) else "User")
     st.write("Google Sheet:", st.session_state.get("spreadsheet_id","(mặc định)") or GOOGLE_SHEET_ID_DEFAULT)
     st.write("Tên sheet KPI:", st.session_state.get("kpi_sheet_name","KPI"))
-'''
-
-Path("/mnt/data/app.py").write_text(APP_CODE, encoding="utf-8")
-print("Full app.py (v2) written (~{} KB)".format(round(len(APP_CODE.encode('utf-8'))/1024,1)))
