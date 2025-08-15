@@ -1,12 +1,13 @@
-# -*- coding: utf-8 -*-
+from pathlib import Path
+
+app_code = r'''# -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v2.3 CLEAN, HIDE CONFIG)
-- Đăng nhập bắt buộc: sau khi đăng nhập ẩn form, chỉ còn lời chào + nút Đăng xuất.
-- Quên mật khẩu: sinh MK tạm 10 ký tự -> cập nhật Google Sheet (tab USE, cột "Mật khẩu mặc định") -> gửi email tới phamlong666@gmail.com.
-- Đổi mật khẩu: chính chủ (có MK cũ) hoặc Admin (không cần MK cũ) -> cập nhật Google Sheet -> gửi email xác nhận.
-- KPI: Bảng KPI (lọc, export), Nhập CSV vào KPI.
-- So khớp USE không phân biệt hoa/thường, bỏ khoảng trắng thừa.
-- ĐÃ ẨN TUYỆT ĐỐI phần "Cấu hình Sheet" khỏi giao diện.
+KPI App – Định Hóa (v2.4 MERGED)
+- Giữ nguyên đầy đủ tính năng từ bản 23KB anh đã chạy tốt (login/forgot/change/admin/email, KPI table, CSV import, write back).
+- Bổ sung theo yêu cầu mới:
+  (1) Đăng nhập nhấn Enter: dùng st.form + form_submit_button.
+  (2) Upload CSV có checkbox chọn từng dòng và form nhập tay giá trị cột của dòng đã chọn.
+- Gating: bắt buộc đăng nhập mới vào nghiệp vụ; ẩn cấu hình sheet trên UI.
 """
 import re
 import io
@@ -15,34 +16,36 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import random
 import string
+from datetime import datetime
 import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+import matplotlib.pyplot as plt
 
-# ================ CẤU HÌNH ================
+# ================= CẤU HÌNH =================
 st.set_page_config(page_title="KPI – Định Hóa", layout="wide")
 APP_TITLE = "📊 KPI – Đội quản lý Điện lực khu vực Định Hóa"
 GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"
 KPI_SHEET_DEFAULT = "KPI"
 ADMIN_ACCOUNTS = {r"pctn\\admin", r"npc\\longph"}
-FORGOT_TARGET_EMAIL = "phamlong666@gmail.com"  # cố định theo yêu cầu
+FORGOT_TARGET_EMAIL = "phamlong666@gmail.com"
 
-# Mặc định (vì đã ẩn cấu hình trên UI)
+# Ẩn cấu hình trên UI: dùng mặc định (có thể đặt trong st.secrets nếu cần)
 if "spreadsheet_id" not in st.session_state:
     st.session_state["spreadsheet_id"] = GOOGLE_SHEET_ID_DEFAULT
 if "kpi_sheet_name" not in st.session_state:
     st.session_state["kpi_sheet_name"] = KPI_SHEET_DEFAULT
 
-# ================ TIỆN ÍCH ================
-def is_admin(username: str) -> bool:
-    return bool(username) and username.strip().lower() in ADMIN_ACCOUNTS
-
+# ================= TIỆN ÍCH =================
 def toast(msg, icon="ℹ️"):
     try:
         st.toast(msg, icon=icon)
     except Exception:
         pass
+
+def is_admin(username: str) -> bool:
+    return bool(username) and username.strip().lower() in ADMIN_ACCOUNTS
 
 def extract_sheet_id(text: str) -> str:
     if not text: return ""
@@ -56,8 +59,8 @@ def get_gs_client():
         if "private_key" in svc:
             svc["private_key"] = (
                 svc["private_key"].replace("\\r\\n", "\\n")
-                                   .replace("\\r", "\\n")
-                                   .replace("\\\\n", "\\n")
+                                  .replace("\\r", "\\n")
+                                  .replace("\\\\n", "\\n")
             )
         scopes = ["https://www.googleapis.com/auth/spreadsheets",
                   "https://www.googleapis.com/auth/drive"]
@@ -82,9 +85,7 @@ def df_from_ws(ws) -> pd.DataFrame:
 # Chuẩn hoá tên cột
 ALIAS = {
     "USE (mã đăng nhập)": [
-        "USE (mã đăng nhập)",
-        r"Tài khoản (USE\\username)",
-        "Tài khoản (USE/username)",
+        "USE (mã đăng nhập)", r"Tài khoản (USE\\username)", "Tài khoản (USE/username)",
         "Tài khoản", "Username", "USE", "User"
     ],
     "Mật khẩu mặc định": [
@@ -242,22 +243,24 @@ def send_email(subject: str, body: str, to_email: str) -> dict:
     except Exception as e:
         return {'ok': False, 'mode': 'smtp', 'message': f"Lỗi gửi email: {e}"}
 
-# ================ SIDEBAR (LOGIN/LOGOUT) ================
+# ================= SIDEBAR (LOGIN/LOGOUT) =================
 with st.sidebar:
     st.header("🔒 Đăng nhập")
 
     if "_user" not in st.session_state:
-        # Form đăng nhập
-        use_input = st.text_input("USE (vd: PCTN\\KVDHA)", key="login_use")
-        pwd_input = st.text_input("Mật khẩu", type="password", key="login_pwd")
-        c1, c3 = st.columns([1,1])
+        # FORM: Enter sẽ submit
+        with st.form("login_form", clear_on_submit=False):
+            use_input = st.text_input("USE (vd: PCTN\\KVDHA)", key="login_use")
+            pwd_input = st.text_input("Mật khẩu", type="password", key="login_pwd")
+            login_submit = st.form_submit_button("Đăng nhập", use_container_width=True)
+        # Quên mật khẩu
+        c1, c2 = st.columns([1,1])
         with c1:
-            login_clicked = st.button("Đăng nhập", use_container_width=True, type="primary", key="btn_login")
-        with c3:
             forgot_use = st.text_input("USE để cấp MK tạm", key="forgot_use")
+        with c2:
             forgot_clicked = st.button("Quên mật khẩu", use_container_width=True, key="btn_forgot")
 
-        if login_clicked:
+        if login_submit:
             df_users = load_users(st.session_state.get("spreadsheet_id",""))
             if check_credentials(df_users, use_input, pwd_input):
                 st.session_state["_user"] = use_input
@@ -285,7 +288,6 @@ with st.sidebar:
                     st.error(f"Không cấp được MK tạm. Lỗi Sheet: {res_sheet['message']} | Lỗi email: {res_mail['message']}")
 
     else:
-        # Sau khi đăng nhập: KHÔNG hiển thị form đăng nhập nữa
         st.success("Chào mừng bạn vào làm việc, chúc bạn luôn vui vẻ nhé!")
         st.write(f"👤 Đang đăng nhập: **{st.session_state['_user']}**")
         logout_clicked = st.button("Đăng xuất", use_container_width=True, key="btn_logout")
@@ -294,7 +296,7 @@ with st.sidebar:
             toast("Đã đăng xuất.", "✅")
             st.rerun()
 
-        # 🛡️ Giữ lại tính năng ĐỔI MẬT KHẨU cho user
+        # Đổi mật khẩu (chính chủ)
         with st.expander("🔐 Đổi mật khẩu (Chính chủ)"):
             old_pw_me = st.text_input("Mật khẩu hiện tại", type="password", key="me_old")
             new_pw_me = st.text_input("Mật khẩu mới", type="password", key="me_new")
@@ -319,7 +321,7 @@ with st.sidebar:
                     else:
                         st.error(f"Đổi mật khẩu thất bại: {res_sheet['message']}")
 
-        # 🛠 Admin đổi mật khẩu cho user khác (vẫn giữ, không có cấu hình sheet)
+        # Admin đổi mật khẩu
         if is_admin(st.session_state["_user"]):
             with st.expander("🛠 Đổi mật khẩu cho người dùng (Admin)"):
                 target_use = st.text_input("USE cần đổi", value="", key="admin_target")
@@ -341,13 +343,13 @@ with st.sidebar:
                         else:
                             st.error(f"Đổi mật khẩu thất bại: {res_sheet['message']}")
 
-# ================ GATING CHÍNH ================
+# ================= GATING CHÍNH =================
 st.title(APP_TITLE)
 if "_user" not in st.session_state:
     st.info("Vui lòng đăng nhập để làm việc.")
     st.stop()
 
-# ================ KPI CORE ================
+# ================= KPI CORE =================
 KPI_COLS = ["Tên chỉ tiêu (KPI)","Đơn vị tính","Kế hoạch","Thực hiện","Trọng số",
             "Bộ phận/người phụ trách","Tháng","Năm","Điểm KPI","Ghi chú","Tên đơn vị"]
 
@@ -412,6 +414,7 @@ def get_sheet_and_name():
     sh = open_spreadsheet(sid_cfg)
     return sh, sheet_name
 
+# ================= TABS =================
 tab1, tab2 = st.tabs(["📋 Bảng KPI","⬆️ Nhập CSV vào KPI"])
 
 with tab1:
@@ -455,7 +458,7 @@ with tab1:
 
 with tab2:
     st.subheader("Nhập CSV vào KPI")
-    st.caption("CSV gợi ý các cột: 'Tên chỉ tiêu (KPI)', 'Đơn vị tính', 'Kế hoạch', 'Thực hiện', 'Trọng số', 'Bộ phận/người phụ trách', 'Tháng', 'Năm', 'Ghi chú', 'Tên đơn vị'.")
+    st.caption("CSV gợi ý: 'Tên chỉ tiêu (KPI)', 'Đơn vị tính', 'Kế hoạch', 'Thực hiện', 'Trọng số', 'Bộ phận/người phụ trách', 'Tháng', 'Năm', 'Ghi chú', 'Tên đơn vị'.")
     up = st.file_uploader("Tải file CSV", type=["csv"])
     if up is not None:
         try:
@@ -468,13 +471,57 @@ with tab2:
             df_csv = df_csv.rename(columns={"Thực hiện (tháng)":"Thực hiện"})
         if "Điểm KPI" not in df_csv.columns:
             df_csv["Điểm KPI"] = df_csv.apply(compute_score, axis=1)
-        st.dataframe(df_csv, use_container_width=True, hide_index=True)
 
-        save_clicked = st.button("💾 Ghi vào sheet KPI", use_container_width=True, type="primary")
+        # Bộ chọn dòng bằng checkbox + form nhập tay giá trị
+        if "_csv_cache" not in st.session_state:
+            st.session_state["_csv_cache"] = df_csv.copy()
+        df_show = st.session_state["_csv_cache"].copy()
+        if "✓ Chọn" not in df_show.columns:
+            df_show.insert(0, "✓ Chọn", False)
+
+        st.write("Chọn tích một dòng để xem/chỉnh bên dưới:")
+        df_edit = st.data_editor(
+            df_show,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            key="csv_editor"
+        )
+        st.session_state["_csv_cache"] = df_edit
+
+        selected_rows = df_edit[df_edit["✓ Chọn"] == True]
+        if not selected_rows.empty:
+            row = selected_rows.iloc[0].drop(labels=["✓ Chọn"], errors="ignore")
+            st.success("Đã chọn 1 dòng. Nhập tay các giá trị cột:")
+            with st.form("csv_row_editor"):
+                edited_vals = {}
+                for col_name, val in row.items():
+                    if isinstance(val, (int, float)) and not pd.isna(val):
+                        new_val = st.number_input(col_name, value=float(val))
+                    else:
+                        new_val = st.text_input(col_name, value="" if pd.isna(val) else str(val))
+                    edited_vals[col_name] = new_val
+                submit_csv = st.form_submit_button("Áp dụng vào bảng CSV tạm")
+            if submit_csv:
+                idx = selected_rows.index[0]
+                for k, v in edited_vals.items():
+                    st.session_state["_csv_cache"].loc[idx, k] = v
+                toast("Đã cập nhật giá trị vào bảng CSV tạm.", "✅")
+
+        # Lưu về sheet
+        save_clicked = st.button("💾 Ghi toàn bộ CSV (đã chỉnh) vào sheet KPI", use_container_width=True, type="primary")
         if save_clicked:
             try:
                 sh, sheet_name = get_sheet_and_name()
-                ok = write_kpi_to_sheet(sh, sheet_name, df_csv)
+                ok = write_kpi_to_sheet(sh, sheet_name, st.session_state["_csv_cache"].drop(columns=["✓ Chọn"], errors="ignore"))
                 if ok: toast("Đã ghi dữ liệu CSV vào sheet KPI.", "✅")
             except Exception as e:
                 st.error(f"Lưu thất bại: {e}")
+    else:
+        st.caption("Chưa tải CSV.")
+
+# ================= END =================
+'''
+
+Path("/mnt/data/app.py").write_text(app_code, encoding="utf-8")
+print("Merged full app.py written. Size: {:.1f} KB".format(Path('/mnt/data/app.py').stat().st_size/1024))
