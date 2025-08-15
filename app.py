@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v2.3 CLEAN)
+KPI App – Định Hóa (v2.3 CLEAN, HIDE CONFIG)
 - Đăng nhập bắt buộc: sau khi đăng nhập ẩn form, chỉ còn lời chào + nút Đăng xuất.
 - Quên mật khẩu: sinh MK tạm 10 ký tự -> cập nhật Google Sheet (tab USE, cột "Mật khẩu mặc định") -> gửi email tới phamlong666@gmail.com.
 - Đổi mật khẩu: chính chủ (có MK cũ) hoặc Admin (không cần MK cũ) -> cập nhật Google Sheet -> gửi email xác nhận.
 - KPI: Bảng KPI (lọc, export), Nhập CSV vào KPI.
 - So khớp USE không phân biệt hoa/thường, bỏ khoảng trắng thừa.
+- ĐÃ ẨN TUYỆT ĐỐI phần "Cấu hình Sheet" khỏi giao diện.
 """
 import re
 import io
@@ -23,8 +24,15 @@ from google.oauth2.service_account import Credentials
 st.set_page_config(page_title="KPI – Định Hóa", layout="wide")
 APP_TITLE = "📊 KPI – Đội quản lý Điện lực khu vực Định Hóa"
 GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"
+KPI_SHEET_DEFAULT = "KPI"
 ADMIN_ACCOUNTS = {r"pctn\\admin", r"npc\\longph"}
 FORGOT_TARGET_EMAIL = "phamlong666@gmail.com"  # cố định theo yêu cầu
+
+# Mặc định (vì đã ẩn cấu hình trên UI)
+if "spreadsheet_id" not in st.session_state:
+    st.session_state["spreadsheet_id"] = GOOGLE_SHEET_ID_DEFAULT
+if "kpi_sheet_name" not in st.session_state:
+    st.session_state["kpi_sheet_name"] = KPI_SHEET_DEFAULT
 
 # ================ TIỆN ÍCH ================
 def is_admin(username: str) -> bool:
@@ -286,15 +294,7 @@ with st.sidebar:
             toast("Đã đăng xuất.", "✅")
             st.rerun()
 
-        # Quản trị nhanh (cấu hình Sheet)
-        st.markdown("---")
-        st.header("⚙️ Cấu hình Sheet")
-        sid_val = st.text_input("Google Sheet ID/URL", value=st.session_state.get("spreadsheet_id",""))
-        st.session_state["spreadsheet_id"] = sid_val
-        kpi_sheet_name = st.text_input("Tên sheet KPI", value=st.session_state.get("kpi_sheet_name","KPI"))
-        st.session_state["kpi_sheet_name"] = kpi_sheet_name
-
-        # Đổi mật khẩu (chính chủ)
+        # 🛡️ Giữ lại tính năng ĐỔI MẬT KHẨU cho user
         with st.expander("🔐 Đổi mật khẩu (Chính chủ)"):
             old_pw_me = st.text_input("Mật khẩu hiện tại", type="password", key="me_old")
             new_pw_me = st.text_input("Mật khẩu mới", type="password", key="me_new")
@@ -319,7 +319,7 @@ with st.sidebar:
                     else:
                         st.error(f"Đổi mật khẩu thất bại: {res_sheet['message']}")
 
-        # Đổi mật khẩu cho user khác (Admin)
+        # 🛠 Admin đổi mật khẩu cho user khác (vẫn giữ, không có cấu hình sheet)
         if is_admin(st.session_state["_user"]):
             with st.expander("🛠 Đổi mật khẩu cho người dùng (Admin)"):
                 target_use = st.text_input("USE cần đổi", value="", key="admin_target")
@@ -408,7 +408,7 @@ def write_kpi_to_sheet(sh, sheet_name: str, df: pd.DataFrame):
 
 def get_sheet_and_name():
     sid_cfg = st.session_state.get("spreadsheet_id","") or GOOGLE_SHEET_ID_DEFAULT
-    sheet_name = st.session_state.get("kpi_sheet_name","KPI")
+    sheet_name = st.session_state.get("kpi_sheet_name", KPI_SHEET_DEFAULT)
     sh = open_spreadsheet(sid_cfg)
     return sh, sheet_name
 
