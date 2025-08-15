@@ -1,13 +1,16 @@
+# Write a CLEAN app.py (no Path.write_text anywhere inside the file).
 from pathlib import Path
 
-app_code = r'''# -*- coding: utf-8 -*-
+clean_code = r'''# -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v2.4 MERGED)
-- Giữ nguyên đầy đủ tính năng từ bản 23KB anh đã chạy tốt (login/forgot/change/admin/email, KPI table, CSV import, write back).
-- Bổ sung theo yêu cầu mới:
-  (1) Đăng nhập nhấn Enter: dùng st.form + form_submit_button.
-  (2) Upload CSV có checkbox chọn từng dòng và form nhập tay giá trị cột của dòng đã chọn.
-- Gating: bắt buộc đăng nhập mới vào nghiệp vụ; ẩn cấu hình sheet trên UI.
+KPI App – Định Hóa (CLEAN, no self-writing)
+- Đăng nhập bằng USE từ tab USE của Google Sheet (hỗ trợ alias cột).
+- Quên mật khẩu (cập nhật MK tạm lên Sheet + gửi email nếu có secrets).
+- Đổi mật khẩu (user & admin).
+- Bảng KPI: lọc, sắp xếp, tải Excel.
+- Nhập CSV vào KPI: checkbox chọn dòng + form nhập tay, ghi lên sheet KPI.
+- Nhấn Enter để đăng nhập (st.form).
+- BẮT BUỘC đăng nhập mới vào được khu vực nghiệp vụ.
 """
 import re
 import io
@@ -26,12 +29,11 @@ import matplotlib.pyplot as plt
 # ================= CẤU HÌNH =================
 st.set_page_config(page_title="KPI – Định Hóa", layout="wide")
 APP_TITLE = "📊 KPI – Đội quản lý Điện lực khu vực Định Hóa"
-GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"
+GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"  # có thể thay bằng sheet của anh
 KPI_SHEET_DEFAULT = "KPI"
 ADMIN_ACCOUNTS = {r"pctn\\admin", r"npc\\longph"}
 FORGOT_TARGET_EMAIL = "phamlong666@gmail.com"
 
-# Ẩn cấu hình trên UI: dùng mặc định (có thể đặt trong st.secrets nếu cần)
 if "spreadsheet_id" not in st.session_state:
     st.session_state["spreadsheet_id"] = GOOGLE_SHEET_ID_DEFAULT
 if "kpi_sheet_name" not in st.session_state:
@@ -157,10 +159,7 @@ def load_users(spreadsheet_id_or_url: str = "") -> pd.DataFrame:
             return df_from_ws(ws)
         except Exception as e:
             st.session_state["_gs_error"] = f"OPEN_ERROR: {e}"
-    try:
-        return pd.read_excel("USE.xlsx", sheet_name="USE")
-    except Exception:
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 def check_credentials(df: pd.DataFrame, use_input: str, pwd_input: str) -> bool:
     if df is None or df.empty:
@@ -188,7 +187,6 @@ def generate_temp_password(n=10) -> str:
     return "".join(random.choice(chars) for _ in range(n))
 
 def update_password_on_sheet(user_use: str, new_password: str, spreadsheet_id_or_url: str = "") -> dict:
-    """Cập nhật MK trên sheet. Trả về dict {'ok':bool, 'row':int|None, 'col_pwd':int|None, 'message':str}"""
     diag = {'ok': False, 'row': None, 'col_pwd': None, 'message': ""}
     try:
         sh = open_spreadsheet(spreadsheet_id_or_url or GOOGLE_SHEET_ID_DEFAULT)
@@ -213,7 +211,6 @@ def update_password_on_sheet(user_use: str, new_password: str, spreadsheet_id_or
         return diag
 
 def send_email(subject: str, body: str, to_email: str) -> dict:
-    """Gửi email; trả dict {'ok':bool,'mode':'smtp|mock','message':str}"""
     try:
         user = st.secrets["email"]["EMAIL_USER"]
         pwd  = st.secrets["email"]["EMAIL_PASS"]
@@ -231,10 +228,12 @@ def send_email(subject: str, body: str, to_email: str) -> dict:
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
         if port == 465:
+            import smtplib
             with smtplib.SMTP_SSL(server_name, port) as server:
                 server.login(user, pwd)
                 server.sendmail(user, [to_email], msg.as_string())
         else:
+            import smtplib
             with smtplib.SMTP(server_name, port) as server:
                 server.starttls()
                 server.login(user, pwd)
@@ -248,12 +247,10 @@ with st.sidebar:
     st.header("🔒 Đăng nhập")
 
     if "_user" not in st.session_state:
-        # FORM: Enter sẽ submit
         with st.form("login_form", clear_on_submit=False):
             use_input = st.text_input("USE (vd: PCTN\\KVDHA)", key="login_use")
             pwd_input = st.text_input("Mật khẩu", type="password", key="login_pwd")
             login_submit = st.form_submit_button("Đăng nhập", use_container_width=True)
-        # Quên mật khẩu
         c1, c2 = st.columns([1,1])
         with c1:
             forgot_use = st.text_input("USE để cấp MK tạm", key="forgot_use")
@@ -296,7 +293,6 @@ with st.sidebar:
             toast("Đã đăng xuất.", "✅")
             st.rerun()
 
-        # Đổi mật khẩu (chính chủ)
         with st.expander("🔐 Đổi mật khẩu (Chính chủ)"):
             old_pw_me = st.text_input("Mật khẩu hiện tại", type="password", key="me_old")
             new_pw_me = st.text_input("Mật khẩu mới", type="password", key="me_new")
@@ -321,7 +317,6 @@ with st.sidebar:
                     else:
                         st.error(f"Đổi mật khẩu thất bại: {res_sheet['message']}")
 
-        # Admin đổi mật khẩu
         if is_admin(st.session_state["_user"]):
             with st.expander("🛠 Đổi mật khẩu cho người dùng (Admin)"):
                 target_use = st.text_input("USE cần đổi", value="", key="admin_target")
@@ -472,7 +467,6 @@ with tab2:
         if "Điểm KPI" not in df_csv.columns:
             df_csv["Điểm KPI"] = df_csv.apply(compute_score, axis=1)
 
-        # Bộ chọn dòng bằng checkbox + form nhập tay giá trị
         if "_csv_cache" not in st.session_state:
             st.session_state["_csv_cache"] = df_csv.copy()
         df_show = st.session_state["_csv_cache"].copy()
@@ -508,7 +502,6 @@ with tab2:
                     st.session_state["_csv_cache"].loc[idx, k] = v
                 toast("Đã cập nhật giá trị vào bảng CSV tạm.", "✅")
 
-        # Lưu về sheet
         save_clicked = st.button("💾 Ghi toàn bộ CSV (đã chỉnh) vào sheet KPI", use_container_width=True, type="primary")
         if save_clicked:
             try:
@@ -519,9 +512,8 @@ with tab2:
                 st.error(f"Lưu thất bại: {e}")
     else:
         st.caption("Chưa tải CSV.")
-
-# ================= END =================
 '''
 
-Path("/mnt/data/app.py").write_text(app_code, encoding="utf-8")
-print("Merged full app.py written. Size: {:.1f} KB".format(Path('/mnt/data/app.py').stat().st_size/1024))
+# Save clean file
+Path("/mnt/data/app.py").write_text(clean_code, encoding="utf-8")
+print("Clean full app.py written. Size: {:.1f} KB".format(Path('/mnt/data/app.py').stat().st_size/1024))
