@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (CLEAN v2.1)
-- Fix UX 'Quên mật khẩu': luôn có ô nhập USE riêng, không cần bấm 2 lần.
-- Ghi mật khẩu tạm vào Google Sheet (so khớp USE không phân biệt hoa/thường, bỏ khoảng trắng thừa).
-- Gửi email mật khẩu tạm tới phamlong666@gmail.com (SMTP từ secrets, mặc định SSL 465; hỗ trợ TLS 587).
-- Sau khi đăng nhập: ẩn form và hiện lời chào.
-- Có Đăng xuất, Đổi mật khẩu, và KPI Tabs.
+KPI App – Định Hóa (v2.2 – FIX mật khẩu CHẮC CHẮN cập nhật Sheet + gửi email)
+- Bắt buộc đăng nhập. Sau khi đăng nhập: ẩn form và hiện lời chào.
+- "Quên mật khẩu": sinh MK tạm 10 ký tự -> CẬP NHẬT Google Sheet -> GỬI email tới phamlong666@gmail.com.
+- "Đổi mật khẩu": người dùng thường phải nhập MK cũ; Admin có thể đổi cho bất kỳ USE không cần MK cũ -> CẬP NHẬT Google Sheet -> GỬI email xác nhận.
+- KPI Tabs: Bảng KPI, Nhập CSV, Quản trị.
+- Thêm CHẨN ĐOÁN: hiển thị trạng thái cập nhật (tìm thấy dòng nào, cột nào) để dễ kiểm tra.
 """
 import re
 import io
@@ -25,6 +25,7 @@ APP_TITLE = "📊 KPI – Đội quản lý Điện lực khu vực Định Hóa
 GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"
 ADMIN_ACCOUNTS = {r"pctn\\admin", r"npc\\longph"}
 FORGOT_TARGET_EMAIL = "phamlong666@gmail.com"  # cố định theo yêu cầu
+DIAG_ENABLED = True  # bật chẩn đoán nhẹ để thấy rõ bước cập nhật
 
 # ================= TIỆN ÍCH CHUNG =================
 def is_admin(username: str) -> bool:
@@ -80,6 +81,7 @@ ALIAS = {
         r"Tài khoản (USE\\username)",
         "Tài khoản (USE/username)",
         "Tài khoản", "Username",
+        "USE", "User"
     ],
     "Mật khẩu mặc định": [
         "Mật khẩu mặc định","Password mặc định","Password","Mật khẩu","Mat khau mac dinh"
@@ -124,7 +126,7 @@ def find_use_ws_and_cols(sh):
                 headers = [h.strip() for h in w.row_values(1)]
             except Exception:
                 continue
-            if (("USE (mã đăng nhập)" in headers) or ("Tài khoản (USE\\username)" in headers) or ("Tài khoản" in headers) or ("Username" in headers)) \
+            if (("USE (mã đăng nhập)" in headers) or ("Tài khoản (USE\\username)" in headers) or ("Tài khoản" in headers) or ("Username" in headers) or ("USE" in headers)) \
                and ("Mật khẩu mặc định" in headers or "Password" in headers or "Mật khẩu" in headers):
                 ws = w; break
         if ws is None:
@@ -134,7 +136,7 @@ def find_use_ws_and_cols(sh):
         for name in names:
             if name in headers: return headers.index(name)+1
         return None
-    idx_use = find_idx(["USE (mã đăng nhập)", "Tài khoản (USE\\username)", "Tài khoản", "Username"])
+    idx_use = find_idx(["USE (mã đăng nhập)", "Tài khoản (USE\\username)", "Tài khoản", "Username","USE"])
     idx_pwd = find_idx(["Mật khẩu mặc định","Password","Mật khẩu"])
     if not idx_use or not idx_pwd:
         raise RuntimeError("MISSING_USE_OR_PASS_COL")
@@ -163,7 +165,7 @@ def check_credentials(df: pd.DataFrame, use_input: str, pwd_input: str) -> bool:
         return False
     df = normalize_columns(df)
     col_use = next((c for c in df.columns if c.strip().lower() in [
-        "tài khoản (use\\username)".lower(), "tài khoản".lower(), "username".lower(), "use (mã đăng nhập)".lower()
+        "tài khoản (use\\username)".lower(), "tài khoản".lower(), "username".lower(), "use (mã đăng nhập)".lower(), "use"
     ]), None)
     col_pw = next((c for c in df.columns if c.strip().lower() in [
         "mật khẩu mặc định".lower(),"password mặc định".lower(),"password".lower(),"mật khẩu".lower()
@@ -172,7 +174,7 @@ def check_credentials(df: pd.DataFrame, use_input: str, pwd_input: str) -> bool:
         st.error("Thiếu cột USE hoặc Mật khẩu trong bảng USE.")
         return False
     u = (use_input or "").strip(); p = (pwd_input or "").strip()
-    row = df.loc[df[col_use].astype(str).str.strip() == u]
+    row = df.loc[df[col_use].astype(str).str.strip().str.lower() == u.lower()]
     if row.empty or str(row.iloc[0][col_pw]).strip() != p:
         st.error("USE hoặc mật khẩu không đúng")
         return False
@@ -183,11 +185,12 @@ def generate_temp_password(n=10) -> str:
     chars = string.ascii_letters + string.digits
     return "".join(random.choice(chars) for _ in range(n))
 
-def update_password_on_sheet(user_use: str, new_password: str, spreadsheet_id_or_url: str = "") -> bool:
+def update_password_on_sheet(user_use: str, new_password: str, spreadsheet_id_or_url: str = "") -> dict:
+    """Cập nhật MK trên sheet. Trả về dict chẩn đoán {'ok':bool, 'row':int|None, 'col_pwd':int|None, 'message':str}"""
+    diag = {'ok': False, 'row': None, 'col_pwd': None, 'message': ""}
     try:
         sh = open_spreadsheet(spreadsheet_id_or_url or GOOGLE_SHEET_ID_DEFAULT)
         ws, idx_use, idx_pwd, headers = find_use_ws_and_cols(sh)
-        # Tìm dòng cần update (so khớp không phân biệt hoa/thường và bỏ khoảng trắng thừa)
         values = ws.col_values(idx_use)
         row_number = None
         needle = str(user_use).strip().lower()
@@ -198,24 +201,26 @@ def update_password_on_sheet(user_use: str, new_password: str, spreadsheet_id_or
                 row_number = i
                 break
         if not row_number:
-            return False
+            diag['message'] = "Không tìm thấy USE trên sheet."
+            return diag
         ws.update_cell(row_number, idx_pwd, new_password)
-        return True
+        diag.update({'ok': True, 'row': row_number, 'col_pwd': idx_pwd, 'message': "Đã cập nhật MK trên sheet."})
+        return diag
     except Exception as e:
-        st.session_state["_pwd_error"] = str(e)
-        return False
+        diag['message'] = f"Lỗi cập nhật sheet: {e}"
+        return diag
 
 # ---- gửi email ----
-def send_email(subject: str, body: str, to_email: str) -> bool:
+def send_email(subject: str, body: str, to_email: str) -> dict:
+    """Gửi email; trả dict {'ok':bool,'mode':'smtp|mock','message':str}"""
     try:
         user = st.secrets["email"]["EMAIL_USER"]
         pwd  = st.secrets["email"]["EMAIL_PASS"]
         server_name = st.secrets["email"].get("SMTP_SERVER", "smtp.gmail.com")
         port = int(st.secrets["email"].get("SMTP_PORT", 465))
     except Exception:
-        # Không có cấu hình email -> coi như gửi "giả lập"
         toast("(Giả lập) Đã gửi email: " + subject, "✉️")
-        return True
+        return {'ok': True, 'mode': 'mock', 'message': 'Giả lập gửi email (thiếu secrets[email]).'}
 
     try:
         msg = MIMEMultipart()
@@ -233,10 +238,9 @@ def send_email(subject: str, body: str, to_email: str) -> bool:
                 server.starttls()
                 server.login(user, pwd)
                 server.sendmail(user, [to_email], msg.as_string())
-        return True
+        return {'ok': True, 'mode': 'smtp', 'message': 'Đã gửi email bằng SMTP.'}
     except Exception as e:
-        st.error(f"Không gửi được email: {e}")
-        return False
+        return {'ok': False, 'mode': 'smtp', 'message': f"Lỗi gửi email: {e}"}
 
 # ================= KPI CORE =================
 KPI_COLS = ["Tên chỉ tiêu (KPI)","Đơn vị tính","Kế hoạch","Thực hiện","Trọng số","Bộ phận/người phụ trách","Tháng","Năm","Điểm KPI","Ghi chú","Tên đơn vị"]
@@ -323,16 +327,25 @@ with st.sidebar:
                 toast("Nhập USE trước khi bấm 'Quên mật khẩu'.", "❗")
             else:
                 temp_pw = generate_temp_password(10)
-                ok_sheet = update_password_on_sheet(u, temp_pw, st.session_state.get("spreadsheet_id",""))
+                res_sheet = update_password_on_sheet(u, temp_pw, st.session_state.get("spreadsheet_id",""))
                 subject = f"[KPI Định Hóa] Mật khẩu tạm cho {u}"
                 body = f"Chào anh/chị,\n\nHệ thống KPI đã tạo mật khẩu tạm cho tài khoản: {u}\nMật khẩu tạm: {temp_pw}\n\nVui lòng đăng nhập và đổi mật khẩu ngay trong mục Quản trị.\nTrân trọng."
-                ok_mail = send_email(subject, body, FORGOT_TARGET_EMAIL)
-                if ok_sheet and ok_mail:
-                    st.info(f"Đã cấp mật khẩu tạm và gửi vào email quản trị cho USE: {u}.")
-                elif ok_mail:
-                    st.warning("Đã gửi email mật khẩu tạm nhưng chưa cập nhật được trên sheet (kiểm tra quyền Editor).")
+                res_mail = send_email(subject, body, FORGOT_TARGET_EMAIL)
+
+                # Thông báo tổng hợp + chẩn đoán
+                if res_sheet['ok'] and res_mail['ok']:
+                    st.success(f"✅ ĐÃ CẤP MẬT KHẨU TẠM cho USE: {u}. (Sheet dòng {res_sheet['row']}, cột MK {res_sheet['col_pwd']}; Email: {res_mail['mode']})")
+                elif res_sheet['ok'] and not res_mail['ok']:
+                    st.warning(f"MK tạm đã cập nhật trên Sheet (dòng {res_sheet['row']}), nhưng email lỗi: {res_mail['message']}")
+                elif not res_sheet['ok'] and res_mail['ok']:
+                    st.warning(f"ĐÃ GỬI EMAIL mật khẩu tạm, nhưng cập nhật Sheet thất bại: {res_sheet['message']}")
                 else:
-                    st.error("Không thực hiện được yêu cầu quên mật khẩu.")
+                    st.error(f"Không cấp được MK tạm. Lỗi Sheet: {res_sheet['message']} | Lỗi email: {res_mail['message']}")
+                if DIAG_ENABLED:
+                    with st.expander("🔎 Chẩn đoán (Forgot Password)"):
+                        st.write("Sheet:", res_sheet)
+                        st.write("Email:", res_mail)
+
     else:
         # Sau khi đăng nhập
         st.success("Chào mừng bạn vào làm việc, chúc bạn luôn vui vẻ nhé!")
@@ -343,7 +356,36 @@ with st.sidebar:
             toast("Đã đăng xuất.", "✅")
             st.experimental_rerun()
 
-        # Khu quản trị cho admin
+        # === Khối "Đổi mật khẩu" cho TẤT CẢ người dùng (chính chủ) ===
+        with st.expander("🔐 Đổi mật khẩu (Chính chủ)"):
+            old_pw_me = st.text_input("Mật khẩu hiện tại", type="password", key="me_old")
+            new_pw_me = st.text_input("Mật khẩu mới", type="password", key="me_new")
+            new_pw2_me = st.text_input("Nhập lại mật khẩu mới", type="password", key="me_new2")
+            me_change = st.button("Cập nhật mật khẩu của tôi", type="primary", key="me_change_btn")
+            if me_change:
+                df_users = load_users(st.session_state.get("spreadsheet_id",""))
+                if not check_credentials(df_users, st.session_state["_user"], old_pw_me):
+                    st.error("Mật khẩu hiện tại không đúng.")
+                elif not new_pw_me or new_pw_me != new_pw2_me:
+                    st.error("Mật khẩu mới không khớp.")
+                else:
+                    res_sheet = update_password_on_sheet(st.session_state["_user"], new_pw_me, st.session_state.get("spreadsheet_id",""))
+                    if res_sheet['ok']:
+                        st.success("✅ Đã đổi mật khẩu thành công (đã cập nhật Google Sheet).")
+                        try:
+                            res_mail = send_email("[KPI Định Hóa] Đổi mật khẩu thành công",
+                                                  f"Tài khoản {st.session_state['_user']} vừa đổi mật khẩu thành công.",
+                                                  FORGOT_TARGET_EMAIL)
+                            if DIAG_ENABLED:
+                                with st.expander("🔎 Chẩn đoán (Change Password)"):
+                                    st.write("Sheet:", res_sheet)
+                                    st.write("Email:", res_mail)
+                        except Exception:
+                            pass
+                    else:
+                        st.error(f"Đổi mật khẩu thất bại: {res_sheet['message']}")
+
+        # === Khu quản trị cho Admin ===
         if is_admin(st.session_state["_user"]):
             st.markdown("---")
             st.header("⚙️ Quản trị (Admin)")
@@ -352,36 +394,26 @@ with st.sidebar:
             kpi_sheet_name = st.text_input("Tên sheet KPI", value=st.session_state.get("kpi_sheet_name","KPI"))
             st.session_state["kpi_sheet_name"] = kpi_sheet_name
 
-            with st.expander("🔐 Thay đổi mật khẩu (Admin hoặc chính chủ)"):
-                target_use = st.text_input("USE cần đổi", value=st.session_state.get("_user",""))
-                old_pw = st.text_input("Mật khẩu cũ (đối với chính chủ)", type="password")
-                new_pw = st.text_input("Mật khẩu mới", type="password")
-                new_pw2 = st.text_input("Nhập lại mật khẩu mới", type="password")
-                change_clicked = st.button("Cập nhật mật khẩu", type="primary", use_container_width=True)
-
-                if change_clicked:
-                    ok_to_change = False
-                    df_users = load_users(st.session_state.get("spreadsheet_id",""))
-                    if is_admin(st.session_state.get("_user","")) and target_use:
-                        ok_to_change = True
+            with st.expander("🛠 Đổi mật khẩu cho người dùng (bỏ qua MK cũ)"):
+                target_use = st.text_input("USE cần đổi", value="", key="admin_target")
+                new_pw_adm = st.text_input("Mật khẩu mới", type="password", key="adm_new")
+                apply_clicked = st.button("Áp dụng", type="primary", key="adm_apply")
+                if apply_clicked:
+                    if not target_use or not new_pw_adm:
+                        st.error("Nhập đủ USE và mật khẩu mới.")
                     else:
-                        if check_credentials(df_users, target_use, old_pw):
-                            ok_to_change = True
-                    if not ok_to_change:
-                        st.error("Không hợp lệ: sai mật khẩu cũ hoặc thiếu thông tin.")
-                    else:
-                        if not new_pw or new_pw != new_pw2:
-                            st.error("Mật khẩu mới không khớp.")
+                        res_sheet = update_password_on_sheet(target_use, new_pw_adm, st.session_state.get("spreadsheet_id",""))
+                        if res_sheet['ok']:
+                            st.success(f"✅ Đã đổi mật khẩu cho {target_use} (dòng {res_sheet['row']}).")
+                            try:
+                                send_email("[KPI Định Hóa] Admin đổi mật khẩu",
+                                           f"Admin đã đổi mật khẩu cho tài khoản {target_use}.", FORGOT_TARGET_EMAIL)
+                            except Exception:
+                                pass
                         else:
-                            if update_password_on_sheet(target_use, new_pw, st.session_state.get("spreadsheet_id","")):
-                                toast("Đã cập nhật mật khẩu mới.", "✅")
-                                try:
-                                    send_email("[KPI Định Hóa] Đổi mật khẩu thành công",
-                                               f"Tài khoản {target_use} vừa đổi mật khẩu thành công.", FORGOT_TARGET_EMAIL)
-                                except Exception:
-                                    pass
-                            else:
-                                st.error("Cập nhật thất bại. Kiểm tra quyền Editor cho service account.")
+                            st.error(f"Đổi mật khẩu thất bại: {res_sheet['message']}")
+            if DIAG_ENABLED and "_gs_error" in st.session_state:
+                st.warning(f"GS SECRETS/OPEN ERROR: {st.session_state['_gs_error']}")
 
 # ================= GATING CỨNG =================
 st.title(APP_TITLE)
