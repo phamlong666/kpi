@@ -31,18 +31,15 @@ st.title("📊 KPI - Đội quản lý Điện lực khu vực Định Hóa")
 # Helpers: Password hash
 # =========================
 def hash_pw(p: str) -> str:
-    """Hashes a password using SHA-256."""
     return hashlib.sha256((p or "").encode()).hexdigest()
 
 def verify_pw(plain: str, hashed: str) -> bool:
-    """Verifies a plain password against a hashed one."""
     return hash_pw(plain) == str(hashed)
 
 # =========================
 # Loader Google SA (multi-mode) + Client SAFE
 # =========================
 def _from_plain_block():
-    """Tries to load service account credentials from a plain JSON block."""
     try:
         sa = dict(st.secrets["gdrive_service_account"])
         if "private_key_b64" in st.secrets["gdrive_service_account"]:
@@ -55,10 +52,7 @@ def _from_plain_block():
         return None
 
 def load_sa_from_secret():
-    """
-    Ưu tiên Fernet (fernet_key + gsa_enc), fallback JSON / base64.
-    Không raise, chỉ trả None nếu thiếu.
-    """
+    """Ưu tiên Fernet (fernet_key + gsa_enc), fallback JSON / base64. Không raise, chỉ trả None nếu thiếu."""
     # Thử Fernet nếu có
     try:
         gsa_enc_b64 = st.secrets.get("gsa_enc")
@@ -79,10 +73,6 @@ def load_sa_from_secret():
     return None, "none"
 
 def get_client_safe():
-    """
-    Loads service account credentials and creates a gspread client.
-    Handles different loading modes and potential errors.
-    """
     sa_dict, mode = load_sa_from_secret()
     if not sa_dict:
         return None, mode, "Thiếu secrets (fernet_key+gsa_enc) hoặc [gdrive_service_account]."
@@ -112,35 +102,91 @@ elif st.session_state.sa_mode == "fernet":
     st.caption("Đang dùng Service Account giải mã bằng Fernet.")
 
 
+
+# =========================
+# URL/ID helpers + column normalization
+# =========================
+import re
+
+def extract_sheet_id(s: str) -> str:
+    """Accept either a raw Spreadsheet ID or a full Google Sheet URL and return the ID."""
+    s = (s or "").strip()
+    m = re.search(r"/d/([a-zA-Z0-9-_]+)", s)
+    return m.group(1) if m else s
+
+ALIAS = {
+    "USE (mã đăng nhập)": [
+        "USE (mã đăng nhập)", 
+        "Tài khoản (USE\\username)", 
+        "Tài khoản (USE/username)", 
+        "Tài khoản", 
+        "Username", 
+        "User"
+    ],
+    "Mật khẩu mặc định": [
+        "Mật khẩu mặc định", 
+        "Mat khau mac dinh", 
+        "Password mặc định", 
+        "Password", 
+        "Mật khẩu"
+    ],
+}
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename columns using ALIAS to expected internal names."""
+    if df is None or df.empty:
+        return df if df is not None else pd.DataFrame()
+    rename_map = {}
+    existing = set(df.columns)
+    for std, candidates in ALIAS.items():
+        if std not in existing:
+            for c in candidates:
+                if c in existing:
+                    rename_map[c] = std
+                    break
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    return df
 # =========================
 # Sheet helpers
 # =========================
 def open_ws(spreadsheet_id, sheet_name):
-    """
-    Opens a worksheet from a given spreadsheet ID and sheet name.
-    Includes more specific error handling.
-    """
     if st.session_state.client is None:
         st.error("Client chưa được kết nối.")
+        return None
+    try:
+        sh = st.session_state.client.open_by_key(extract_sheet_id(spreadsheet_id))
+        try:
+            return sh.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            # Fallback: scan for a tab that has required columns
+            try:
+                for ws in sh.worksheets():
+                    try:
+                        hdr = ws.row_values(1)
+                    except Exception:
+                        hdr = []
+                    hdr = [h.strip() for h in hdr]
+                    if ("Tên đơn vị" in hdr and "Mật khẩu mặc định" in hdr) or                        ("Tài khoản (USE\username)" in hdr and "Mật khẩu mặc định" in hdr) or                        ("USE (mã đăng nhập)" in hdr and "Mật khẩu mặc định" in hdr):
+                        return ws
+            except Exception:
+                pass
+            st.error(f"Không tìm thấy sheet '{sheet_name}' và cũng không tìm được tab phù hợp.")
+            return None
+    except Exception as e:
+        st.error(f"Lỗi khi mở sheet: {e}")
         return None
     try:
         sh = st.session_state.client.open_by_key(spreadsheet_id)
         return sh.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
-        st.error(f"Lỗi: Sheet '{sheet_name}' không tồn tại. Vui lòng kiểm tra lại tên sheet trong Google Sheet.")
-        return None
-    except gspread.exceptions.APIError as e:
-        if e.response.status_code == 404:
-            st.error(f"Lỗi: Không thể tìm thấy Spreadsheet với ID '{spreadsheet_id}'. Vui lòng kiểm tra lại ID.")
-        else:
-            st.error(f"Lỗi API Google: {e}")
+        st.error(f"Sheet '{sheet_name}' không tồn tại. Vui lòng tạo sheet này trong Google Sheet.")
         return None
     except Exception as e:
         st.error(f"Lỗi khi mở sheet: {e}")
         return None
 
 def ensure_headers(ws, headers):
-    """Ensures a worksheet has the correct headers."""
     try:
         cur = ws.row_values(1)
     except:
@@ -149,13 +195,11 @@ def ensure_headers(ws, headers):
         ws.clear(); ws.append_row(headers, value_input_option="RAW")
 
 def ws_to_df(ws):
-    """Converts a worksheet to a pandas DataFrame."""
     rows = ws.get_all_values()
     if not rows: return pd.DataFrame()
     return pd.DataFrame(rows[1:], columns=rows[0])
 
 def df_to_ws(ws, df):
-    """Converts a pandas DataFrame to a worksheet."""
     ws.clear(); ws.append_row(list(df.columns), value_input_option="RAW")
     if not df.empty:
         ws.append_rows(df.astype(str).values.tolist(), value_input_option="RAW")
@@ -186,6 +230,7 @@ with st.sidebar:
             ws = open_ws(spreadsheet_id, "USE")
             if ws:
                 df = ws_to_df(ws)
+                df = normalize_columns(df)
                 # Tìm tài khoản trong cột "USE (mã đăng nhập)"
                 row = df[df["USE (mã đăng nhập)"].astype(str)==acc_input]
                 if row.empty: st.error("Không tìm thấy tài khoản")
@@ -224,6 +269,7 @@ with st.sidebar:
                 ws_use = open_ws(spreadsheet_id,"USE")
                 if ws_use:
                     df_use = ws_to_df(ws_use)
+                    df_use = normalize_columns(df_use)
                     need = {"Tên đơn vị","USE (mã đăng nhập)","Mật khẩu mặc định"}
                     if not need.issubset(df_use.columns): st.error("Sheet USE thiếu cột bắt buộc: 'Tên đơn vị', 'USE (mã đăng nhập)', 'Mật khẩu mặc định'")
                     else:
@@ -375,4 +421,3 @@ else:
                 df["Điểm KPI"]=pd.to_numeric(df["Điểm KPI"],errors="coerce")
                 ranking=df.groupby(["USE","Tháng","Năm"]).agg({"Điểm KPI":"sum"}).reset_index()
                 st.dataframe(ranking.sort_values(["Năm","Tháng","Điểm KPI"],ascending=[False,False,False]))
-
