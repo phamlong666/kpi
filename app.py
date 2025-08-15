@@ -1,423 +1,400 @@
 # -*- coding: utf-8 -*-
-"""
-app.py — KPI - Đội quản lý Điện lực khu vực Định Hóa
-- Logo từ GitHub + tiêu đề app
-- Đăng nhập / Đăng xuất / Đồng bộ Users từ sheet USE
-- Đổi mật khẩu / Quên mật khẩu (ghi ResetRequests)
-- Nhập KPI từ CSV/XLSX → ghi KPI_DB
-- Báo cáo: tháng hiện tại / so tháng trước / so cùng kỳ
-- Admin: so sánh KPI giữa các đơn vị
-- Bảo mật: loader 3 chế độ (Fernet, JSON, base64)
-"""
-
+import re
+import io
+import json
+import math
+import time
+from datetime import datetime
 import streamlit as st
 import pandas as pd
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
-from io import BytesIO
-import hashlib, uuid, base64, json
-# Thêm import cho Fernet
-from cryptography.fernet import Fernet
+from google.oauth2.service_account import Credentials
+import matplotlib.pyplot as plt
 
-# =========================
-# Page config + Logo + Title
-# =========================
+# ============================================================
+# CẤU HÌNH CHUNG
+# ============================================================
 st.set_page_config(page_title="KPI - Đội quản lý Điện lực khu vực Định Hóa", layout="wide")
-st.image("https://raw.githubusercontent.com/phamlong666/kpi/main/logo_hinh_tron.png", width=80)
-st.title("📊 KPI - Đội quản lý Điện lực khu vực Định Hóa")
+APP_TITLE = "📊 KPI - Đội quản lý Điện lực khu vực Định Hóa"
 
-# =========================
-# Helpers: Password hash
-# =========================
-def hash_pw(p: str) -> str:
-    return hashlib.sha256((p or "").encode()).hexdigest()
-
-def verify_pw(plain: str, hashed: str) -> bool:
-    return hash_pw(plain) == str(hashed)
-
-# =========================
-# Loader Google SA (multi-mode) + Client SAFE
-# =========================
-def _from_plain_block():
-    try:
-        sa = dict(st.secrets["gdrive_service_account"])
-        if "private_key_b64" in st.secrets["gdrive_service_account"]:
-            pk = base64.b64decode(st.secrets["gdrive_service_account"]["private_key_b64"]).decode()
-            sa["private_key"] = pk
-        if "private_key" in sa:
-            sa["private_key"] = sa["private_key"].replace("\\n", "\n")
-        return sa
-    except Exception:
-        return None
-
-def load_sa_from_secret():
-    """Ưu tiên Fernet (fernet_key + gsa_enc), fallback JSON / base64. Không raise, chỉ trả None nếu thiếu."""
-    # Thử Fernet nếu có
-    try:
-        gsa_enc_b64 = st.secrets.get("gsa_enc")
-        fernet_key  = st.secrets.get("fernet_key")
-        if gsa_enc_b64 and fernet_key:
-            blob = base64.b64decode(gsa_enc_b64.encode())
-            sa_bytes = Fernet(fernet_key.encode()).decrypt(blob)
-            sa = json.loads(sa_bytes.decode())
-            if "private_key" in sa:
-                sa["private_key"] = sa["private_key"].replace("\\n", "\n")
-            return sa, "fernet"
-    except Exception:
-        pass
-    # Fallback: block JSON/base64
-    sa_legacy = _from_plain_block()
-    if sa_legacy:
-        return sa_legacy, "legacy"
-    return None, "none"
-
-def get_client_safe():
-    sa_dict, mode = load_sa_from_secret()
-    if not sa_dict:
-        return None, mode, "Thiếu secrets (fernet_key+gsa_enc) hoặc [gdrive_service_account]."
-    try:
-        scope = ["https://spreadsheets.google.com/feeds",
-                 "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_dict, scope)
-        client = gspread.authorize(creds)
-        return client, mode, None
-    except Exception as e:
-        return None, mode, f"Lỗi Google auth: {e}"
-
-# Khởi tạo session state
-if "client" not in st.session_state:
-    st.session_state["client"] = None
-if "connected" not in st.session_state:
-    st.session_state["connected"] = False
-if "client_err" not in st.session_state:
-    st.session_state["client_err"] = ""
-
-# Banner trạng thái kết nối
-if not st.session_state.connected:
-    st.warning(st.session_state.client_err or "Chưa cấu hình Service Account. Vẫn có thể xem giao diện, nhưng sẽ không đọc/ghi Google Sheets.")
-elif st.session_state.sa_mode == "legacy":
-    st.info("Đang dùng chế độ kết nối dự phòng (không dùng Fernet).")
-elif st.session_state.sa_mode == "fernet":
-    st.caption("Đang dùng Service Account giải mã bằng Fernet.")
-
-
-
-# =========================
-# URL/ID helpers + column normalization
-# =========================
-import re
-
-def extract_sheet_id(s: str) -> str:
-    """Accept either a raw Spreadsheet ID or a full Google Sheet URL and return the ID."""
-    s = (s or "").strip()
-    m = re.search(r"/d/([a-zA-Z0-9-_]+)", s)
-    return m.group(1) if m else s
+# ============================================================
+# TIỆN ÍCH CHUNG
+# ============================================================
+def extract_sheet_id(text: str) -> str:
+    """Nhận vào: ID hoặc cả URL Google Sheet → Trả ra: ID hợp lệ"""
+    if not text:
+        return ""
+    text = text.strip()
+    m = re.search(r"/d/([a-zA-Z0-9-_]+)", text)
+    return m.group(1) if m else text
 
 ALIAS = {
     "USE (mã đăng nhập)": [
-        "USE (mã đăng nhập)", 
-        "Tài khoản (USE\\username)", 
-        "Tài khoản (USE/username)", 
-        "Tài khoản", 
-        "Username", 
-        "User"
+        "USE (mã đăng nhập)",
+        r"Tài khoản (USE\username)",
+        "Tài khoản (USE/username)",
+        "Tài khoản (USE\\username)",
+        "Tài khoản",
+        "Username",
+        "Tài khoản USE",
     ],
     "Mật khẩu mặc định": [
-        "Mật khẩu mặc định", 
-        "Mat khau mac dinh", 
-        "Password mặc định", 
-        "Password", 
-        "Mật khẩu"
+        "Mật khẩu mặc định",
+        "Password mặc định",
+        "Mat khau mac dinh",
+        "Password",
+        "Mật khẩu",
     ],
+    "Tên đơn vị": [
+        "Tên đơn vị",
+        "Ten don vi",
+        "Đơn vị",
+        "Don vi",
+        "Đơn vị/Phòng ban",
+    ],
+    # Các cột KPI phổ biến
+    "Chỉ tiêu": ["Chỉ tiêu","Chi tieu","KPI","Tên KPI"],
+    "Kế hoạch": ["Kế hoạch","Ke hoach","Plan","Target"],
+    "Thực hiện (tháng)": ["Thực hiện (tháng)","Thuc hien (thang)","Thực hiện tháng","Actual (month)"],
+    "Thực hiện (lũy kế)": ["Thực hiện (lũy kế)","Thuc hien (luy ke)","Actual (YTD)","Lũy kế"],
+    "Đơn vị tính": ["Đơn vị tính","Don vi tinh","Unit"],
+    "Trọng số": ["Trọng số","Trong so","Weight"],
+    "Ghi chú": ["Ghi chú","Ghi chu","Notes"],
+    "Tháng": ["Tháng","Thang","Month"],
+    "Năm": ["Năm","Nam","Year"],
 }
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename columns using ALIAS to expected internal names."""
+    """Chuẩn hoá tên cột theo ALIAS"""
     if df is None or df.empty:
-        return df if df is not None else pd.DataFrame()
+        return df
+    cols_lower = {c.strip().lower(): c for c in df.columns}
     rename_map = {}
-    existing = set(df.columns)
-    for std, candidates in ALIAS.items():
-        if std not in existing:
-            for c in candidates:
-                if c in existing:
-                    rename_map[c] = std
-                    break
+    for std_name, candidates in ALIAS.items():
+        if std_name in df.columns:
+            continue
+        for c in candidates:
+            key = c.strip().lower()
+            if key in cols_lower:
+                rename_map[cols_lower[key]] = std_name
+                break
     if rename_map:
         df = df.rename(columns=rename_map)
     return df
-# =========================
-# Sheet helpers
-# =========================
-def open_ws(spreadsheet_id, sheet_name):
-    if st.session_state.client is None:
-        st.error("Client chưa được kết nối.")
-        return None
+
+def df_from_ws(ws) -> pd.DataFrame:
+    """Đọc tất cả từ worksheet → DataFrame"""
+    records = ws.get_all_records(expected_headers=ws.row_values(1))
+    df = pd.DataFrame(records)
+    return df
+
+def get_gs_client():
+    """Khởi tạo client gspread từ st.secrets"""
     try:
-        sh = st.session_state.client.open_by_key(extract_sheet_id(spreadsheet_id))
+        svc = dict(st.secrets["gdrive_service_account"])
+        if "private_key" in svc:
+            svc["private_key"] = svc["private_key"].replace("\\n", "\n")
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(svc, scopes=scopes)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        st.session_state["_gs_error"] = str(e)
+        return None
+
+def open_spreadsheet(spreadsheet_id_or_url: str):
+    sid = extract_sheet_id(spreadsheet_id_or_url)
+    if not sid:
+        raise ValueError("Chưa nhập Spreadsheet ID/URL.")
+    client = st.session_state.get("_gs_client")
+    if client is None:
+        client = get_gs_client()
+        st.session_state["_gs_client"] = client
+    if client is None:
+        raise RuntimeError("Không thể khởi tạo kết nối Google Sheets.")
+    return client.open_by_key(sid)
+
+def find_use_worksheet(sh) -> gspread.Worksheet:
+    """Tìm tab 'USE' hoặc tab nào có cột hợp lệ cho đăng nhập"""
+    try:
+        return sh.worksheet("USE")
+    except Exception:
+        pass
+    for ws in sh.worksheets():
         try:
-            return sh.worksheet(sheet_name)
-        except gspread.exceptions.WorksheetNotFound:
-            # Fallback: scan for a tab that has required columns
-            try:
-                for ws in sh.worksheets():
-                    try:
-                        hdr = ws.row_values(1)
-                    except Exception:
-                        hdr = []
-                    hdr = [h.strip() for h in hdr]
-                    if ("Tên đơn vị" in hdr and "Mật khẩu mặc định" in hdr) or                        (r"Tài khoản (USE\username)" in hdr and "Mật khẩu mặc định" in hdr) or                        ("USE (mã đăng nhập)" in hdr and "Mật khẩu mặc định" in hdr):
-                        return ws
-            except Exception:
-                pass
-            st.error(f"Không tìm thấy sheet '{sheet_name}' và cũng không tìm được tab phù hợp.")
+            headers = [h.strip() for h in ws.row_values(1)]
+            hdr_set = set(headers)
+            need_any = [
+                {"USE (mã đăng nhập)","Mật khẩu mặc định"},
+                {r"Tài khoản (USE\\username)","Mật khẩu mặc định"},
+                {r"Tài khoản (USE\username)","Mật khẩu mặc định"},
+            ]
+            for need in need_any:
+                if need.issubset(hdr_set):
+                    return ws
+        except Exception:
+            continue
+    raise gspread.exceptions.WorksheetNotFound("Không tìm thấy sheet USE phù hợp.")
+
+def get_ws_by_name_or_guess(sh, preferred_names):
+    """Tìm worksheet theo danh sách tên ưu tiên; không có thì trả None"""
+    for name in preferred_names:
+        try:
+            return sh.worksheet(name)
+        except Exception:
+            continue
+    return None
+
+# ============================================================
+# TÍNH KPI (AN TOÀN – TỔNG QUÁT)
+# ============================================================
+def safe_float(x):
+    try:
+        if x is None or (isinstance(x, float) and math.isnan(x)):
             return None
-    except Exception as e:
-        st.error(f"Lỗi khi mở sheet: {e}")
-        return None
-    try:
-        sh = st.session_state.client.open_by_key(spreadsheet_id)
-        return sh.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        st.error(f"Sheet '{sheet_name}' không tồn tại. Vui lòng tạo sheet này trong Google Sheet.")
-        return None
-    except Exception as e:
-        st.error(f"Lỗi khi mở sheet: {e}")
+        s = str(x).replace(",", ".")
+        return float(s)
+    except Exception:
         return None
 
-def ensure_headers(ws, headers):
-    try:
-        cur = ws.row_values(1)
-    except:
-        cur = []
-    if cur != headers:
-        ws.clear(); ws.append_row(headers, value_input_option="RAW")
+def compute_kpi_score(row):
+    """Công thức tổng quát:
+       - Nếu có 'Kế hoạch' và 'Thực hiện (tháng)': Điểm = min( max(Thực hiện/Kế hoạch, 0), 2 ) * 10 * (Trọng số%)
+       - Nếu không đủ dữ liệu, trả None
+       - Không áp công thức đặc thù 'dự báo ±1.5%' để tránh sai lệch; có thể cắm bổ sung sau.
+    """
+    plan = safe_float(row.get("Kế hoạch"))
+    actual = safe_float(row.get("Thực hiện (tháng)"))
+    weight = safe_float(row.get("Trọng số"))
+    if weight is None:
+        weight = 0.0
+    if plan is None or plan == 0 or actual is None:
+        return None
+    ratio = max(min(actual/plan, 2.0), 0.0)
+    score10 = ratio * 10.0
+    # Trọng số có thể nhập dạng 10 hoặc 0.1 → chuẩn hoá về [0..1]
+    w = weight/100.0 if weight > 1.0 else weight
+    return round(score10 * w, 2)
 
-def ws_to_df(ws):
-    rows = ws.get_all_values()
-    if not rows: return pd.DataFrame()
-    return pd.DataFrame(rows[1:], columns=rows[0])
+def prepare_kpi_df(df_raw: pd.DataFrame):
+    if df_raw is None or df_raw.empty:
+        return df_raw, []
+    df = normalize_columns(df_raw.copy())
+    # Tạo cột Điểm nếu đủ trường
+    if "Điểm" not in df.columns:
+        df["Điểm"] = df.apply(compute_kpi_score, axis=1)
+    # Các cột đề xuất để hiển thị
+    columns_pref = [c for c in [
+        "Tên đơn vị","Chỉ tiêu","Đơn vị tính","Kế hoạch","Thực hiện (tháng)",
+        "Thực hiện (lũy kế)","Trọng số","Điểm","Tháng","Năm","Ghi chú"
+    ] if c in df.columns]
+    return df, columns_pref
 
-def df_to_ws(ws, df):
-    ws.clear(); ws.append_row(list(df.columns), value_input_option="RAW")
-    if not df.empty:
-        ws.append_rows(df.astype(str).values.tolist(), value_input_option="RAW")
+def filter_by_time(df: pd.DataFrame, month: int|None, year: int|None):
+    if df is None or df.empty:
+        return df
+    if year and "Năm" in df.columns:
+        df = df[df["Năm"].astype(str) == str(year)]
+    if month and "Tháng" in df.columns:
+        df = df[df["Tháng"].astype(str) == str(month)]
+    return df
 
-# =========================
-# Sidebar: kết nối + đăng nhập + sync Users
-# =========================
+def to_excel_download(df: pd.DataFrame, filename="kpi_export.xlsx"):
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="KPI")
+    return out.getvalue(), filename
+
+# ============================================================
+# SIDEBAR (KẾT NỐI + ĐĂNG NHẬP + THAM SỐ)
+# ============================================================
 with st.sidebar:
-    st.subheader("🔗 Kết nối dữ liệu")
-    spreadsheet_id = st.text_input("Spreadsheet ID", value=st.session_state.get("sheet_id", ""))
-    st.session_state["sheet_id"] = spreadsheet_id
-    st.caption("Dán phần giữa URL Google Sheet (/d/<ID>/edit)")
+    st.header("🔗 Kết nối dữ liệu")
+    sid_input = st.text_input(
+        "ID bảng tính",
+        value=st.session_state.get("spreadsheet_id",""),
+        placeholder="Dán URL hoặc ID Google Sheet (/d/<ID>/edit)",
+        help="Có thể dán cả URL; hệ thống sẽ tự rút ID."
+    )
+    st.session_state["spreadsheet_id"] = sid_input
 
-    st.divider()
-    st.subheader("🔐 Đăng nhập")
-    acc_input = st.text_input("Tài khoản (USE\\username)", value=st.session_state.get("auth_acc",""))
-    pw_input  = st.text_input("Mật khẩu", type="password")
+    st.text_input("Tên sheet KPI", key="kpi_sheet_name", value=st.session_state.get("kpi_sheet_name","KPI"))
 
-    if st.button("Đăng nhập", use_container_width=True):
-        client, sa_mode, client_err = get_client_safe()
-        if client:
-            st.session_state.client = client
-            st.session_state.connected = True
-            st.session_state.sa_mode = sa_mode
-            st.session_state.client_err = None
-            
-            # Mở sheet "USE" để đăng nhập
-            ws = open_ws(spreadsheet_id, "USE")
-            if ws:
-                df = ws_to_df(ws)
-                df = normalize_columns(df)
-                # Tìm tài khoản trong cột "USE (mã đăng nhập)"
-                row = df[df["USE (mã đăng nhập)"].astype(str)==acc_input]
-                if row.empty: st.error("Không tìm thấy tài khoản")
-                else:
-                    r=row.iloc[0]
-                    # Đảm bảo cột "Mật khẩu_băm" và "Kích hoạt" tồn tại
-                    if "Mật khẩu_băm" not in r or "Kích hoạt" not in r:
-                        st.error("Sheet USE chưa được đồng bộ. Vui lòng đồng bộ trước khi đăng nhập.")
-                    elif str(r.get("Kích hoạt","1"))=="0": st.error("Chưa kích hoạt")
-                    elif verify_pw(pw_input, r.get("Mật khẩu_băm","")):
-                        st.session_state.update({"is_auth":True,
-                                                "auth_acc":acc_input,
-                                                "auth_use":str(r.get("USE (mã đăng nhập)","")).split("\\")[0],
-                                                "role":r.get("Vai trò","user")})
-                        st.success("Đăng nhập thành công")
-                    else: st.error("Sai mật khẩu")
+    st.markdown("---")
+    st.header("🔒 Đăng nhập")
+    username = st.text_input("Tài khoản (USE\\username)", value=st.session_state.get("_username",""))
+    password = st.text_input("Mật khẩu", type="password", value=st.session_state.get("_password",""))
+
+    colA, colB = st.columns(2)
+    with colA:
+        login_clicked = st.button("Đăng nhập", use_container_width=True, type="primary")
+    with colB:
+        logout_clicked = st.button("Đăng xuất", use_container_width=True)
+
+    st.markdown("---")
+    sync_clicked = st.button("🌿 Đồng bộ Users từ sheet USE", use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Bộ lọc thời gian")
+    col_time1, col_time2 = st.columns(2)
+    with col_time1:
+        month_sel = st.selectbox("Tháng", options=[None]+list(range(1,13)), index=0, format_func=lambda x: "Tất cả" if x is None else x)
+    with col_time2:
+        year_sel = st.text_input("Năm", value=str(datetime.now().year))
+
+# ============================================================
+# XỬ LÝ ĐĂNG NHẬP & ĐỒNG BỘ NGƯỜI DÙNG
+# ============================================================
+login_msg = ""
+
+def handle_login():
+    global login_msg
+    try:
+        sh = open_spreadsheet(st.session_state["spreadsheet_id"])
+        ws = find_use_worksheet(sh)
+        df = df_from_ws(ws)
+        df = normalize_columns(df)
+
+        # Cột bắt buộc
+        for req in ["USE (mã đăng nhập)","Mật khẩu mặc định"]:
+            if req not in df.columns:
+                raise ValueError(f"Thiếu cột bắt buộc: {req}")
+
+        u = (username or "").strip()
+        p = (password or "").strip()
+        row = df.loc[df["USE (mã đăng nhập)"].astype(str).str.strip() == u]
+        if row.empty:
+            login_msg = "Sai tài khoản hoặc chưa có trong danh sách."
+            return False
+        pass_ok = str(row["Mật khẩu mặc định"].iloc[0]).strip()
+
+        if p and p == pass_ok:
+            st.session_state["_user"] = u
+            st.session_state["_username"] = u
+            st.session_state["_password"] = p
+            login_msg = "Đăng nhập thành công."
+            return True
         else:
-            st.session_state.connected = False
-            st.session_state.client_err = client_err
-            st.error(client_err)
+            login_msg = "Mật khẩu không đúng."
+            return False
+    except Exception as e:
+        login_msg = f"Lỗi đăng nhập: {e}"
+        return False
 
+def handle_logout():
+    st.session_state.pop("_user", None)
+    st.session_state["_password"] = ""
+    st.session_state["_username"] = ""
 
-    if st.button("Đăng xuất", use_container_width=True):
-        st.session_state.clear(); st.experimental_rerun()
+def handle_sync_users():
+    try:
+        sh = open_spreadsheet(st.session_state["spreadsheet_id"])
+        ws = find_use_worksheet(sh)
+        df = df_from_ws(ws)
+        df = normalize_columns(df)
+        st.toast(f"Đã đọc {len(df)} người dùng từ sheet USE.", icon="✅")
+    except Exception as e:
+        st.toast(f"Đồng bộ thất bại: {e}", icon="❌")
 
-    with st.expander("🧩 Đồng bộ Users từ sheet USE"):
-        st.caption("Ứng dụng sẽ hash mật khẩu từ cột 'Mật khẩu mặc định' và lưu vào cột 'Mật khẩu_băm' trên cùng sheet.")
-        if st.button("Đồng bộ ngay"):
-            client, sa_mode, client_err = get_client_safe()
-            if client:
-                st.session_state.client = client
-                st.session_state.connected = True
-                st.session_state.sa_mode = sa_mode
-                st.session_state.client_err = None
-                
-                ws_use = open_ws(spreadsheet_id,"USE")
-                if ws_use:
-                    df_use = ws_to_df(ws_use)
-                    df_use = normalize_columns(df_use)
-                    need = {"Tên đơn vị","USE (mã đăng nhập)","Mật khẩu mặc định"}
-                    if not need.issubset(df_use.columns): st.error("Sheet USE thiếu cột bắt buộc: 'Tên đơn vị', 'USE (mã đăng nhập)', 'Mật khẩu mặc định'")
-                    else:
-                        # Thêm các cột cần thiết nếu chưa có
-                        if "Mật khẩu_băm" not in df_use.columns: df_use["Mật khẩu_băm"]=""
-                        if "Vai trò" not in df_use.columns: df_use["Vai trò"]=""
-                        if "Kích hoạt" not in df_use.columns: df_use["Kích hoạt"]="1"
-                        
-                        # Cập nhật các cột
-                        for idx, row in df_use.iterrows():
-                            unit = str(row.get("Tên đơn vị", "")).lower()
-                            acc = str(row.get("USE (mã đăng nhập)", "")).strip()
-                            pw_default = str(row.get("Mật khẩu mặc định", "123456"))
-                            
-                            if acc:
-                                # Tạo mật khẩu băm
-                                df_use.at[idx, "Mật khẩu_băm"] = hash_pw(pw_default)
-                                # Phân quyền admin/user
-                                df_use.at[idx, "Vai trò"] = "admin" if "admin" in unit else "user"
-                                # Kích hoạt tài khoản
-                                df_use.at[idx, "Kích hoạt"] = "1"
-                        
-                        # Ghi lại dữ liệu đã cập nhật vào sheet "USE"
-                        df_to_ws(ws_use, df_use)
-                        st.success(f"Đồng bộ xong {len(df_use)} tài khoản vào sheet 'USE'")
+if login_clicked:
+    handle_login()
+if logout_clicked:
+    handle_logout()
+if sync_clicked:
+    handle_sync_users()
+
+# ============================================================
+# MAIN UI
+# ============================================================
+st.title(APP_TITLE)
+
+# Hiển thị trạng thái đăng nhập ngắn gọn
+if "_user" in st.session_state:
+    st.success(f"Đang đăng nhập: **{st.session_state['_user']}**")
+elif login_msg:
+    st.error(login_msg)
+
+# Tabs chính
+tab1, tab2, tab3 = st.tabs(["📋 Bảng KPI", "📈 Biểu đồ", "⚙️ Quản trị"])
+
+def load_kpi_df():
+    try:
+        sh = open_spreadsheet(st.session_state["spreadsheet_id"])
+        ws = get_ws_by_name_or_guess(sh, [st.session_state.get("kpi_sheet_name","KPI"), "KPI", "KPI_Data", "KPIs"])
+        if ws is None:
+            st.warning("Chưa tìm thấy sheet KPI. Hãy kiểm tra tên sheet ở sidebar.")
+            return pd.DataFrame()
+        df = df_from_ws(ws)
+        df = normalize_columns(df)
+        df, cols = prepare_kpi_df(df)
+        df = filter_by_time(df, month_sel, year_sel if year_sel else None)
+        return df, cols
+    except Exception as e:
+        st.error(f"Lỗi khi đọc KPI: {e}")
+        return pd.DataFrame(), []
+
+with tab1:
+    st.subheader("Bảng KPI")
+    df_kpi, show_cols = load_kpi_df()
+    if df_kpi is not None and not df_kpi.empty:
+        # Lọc theo đơn vị nếu có cột
+        if "Tên đơn vị" in df_kpi.columns:
+            units = ["Tất cả"] + sorted(df_kpi["Tên đơn vị"].dropna().astype(str).unique().tolist())
+            unit_sel = st.selectbox("Chọn đơn vị", options=units, index=0)
+            if unit_sel != "Tất cả":
+                df_kpi = df_kpi[df_kpi["Tên đơn vị"].astype(str) == unit_sel]
+
+        # Sắp xếp theo Điểm nếu có
+        sort_by_score = st.checkbox("Sắp xếp theo Điểm (giảm dần)", value=True)
+        if sort_by_score and "Điểm" in df_kpi.columns:
+            df_kpi = df_kpi.sort_values(by="Điểm", ascending=False)
+
+        st.dataframe(df_kpi[show_cols] if show_cols else df_kpi, use_container_width=True, hide_index=True)
+
+        # Xuất Excel
+        buf, fname = to_excel_download(df_kpi)
+        st.download_button("⬇️ Tải Excel bảng hiện tại", buf, file_name=fname, use_container_width=True)
+
+    else:
+        st.info("Chưa có dữ liệu KPI hoặc chưa kết nối sheet.")
+
+with tab2:
+    st.subheader("Biểu đồ KPI")
+    df_kpi2, show_cols2 = load_kpi_df()
+    if df_kpi2 is not None and not df_kpi2.empty:
+        # Chọn chỉ tiêu để vẽ theo đơn vị (hoặc ngược lại)
+        col_plot1, col_plot2 = st.columns(2)
+        with col_plot1:
+            field_y = st.selectbox("Trường giá trị", options=[c for c in ["Điểm","Thực hiện (tháng)","Thực hiện (lũy kế)","Kế hoạch"] if c in df_kpi2.columns])
+        with col_plot2:
+            if "Tên đơn vị" in df_kpi2.columns:
+                group_field = "Tên đơn vị"
             else:
-                st.session_state.connected = False
-                st.session_state.client_err = client_err
-                st.error(client_err)
+                group_field = st.selectbox("Nhóm theo", options=[c for c in df_kpi2.columns if c not in ["Điểm"]])
 
+        agg = df_kpi2.groupby(group_field, dropna=True)[field_y].sum().sort_values(ascending=False).head(20)
+        fig, ax = plt.subplots()
+        agg.plot(kind="bar", ax=ax)  # Không set màu theo yêu cầu tool
+        ax.set_ylabel(field_y)
+        ax.set_xlabel(group_field)
+        ax.set_title(f"{field_y} theo {group_field}")
+        st.pyplot(fig)
+    else:
+        st.info("Chưa có dữ liệu để vẽ.")
 
-# =========================
-# Stop nếu chưa login
-# =========================
-if not st.session_state.get("is_auth"):
-    st.info("Hãy đăng nhập hoặc đồng bộ Users trước")
-else:
-    use_login=st.session_state.get("auth_use","")
-    st.success(f"Xin chào {st.session_state.get('auth_acc')} — USE: {use_login}")
-
-    # =========================
-    # Đổi mật khẩu / Quên mật khẩu
-    # =========================
-    old_pw,new_pw,new_pw2=st.columns(3)
-    with old_pw: op=st.text_input("Mật khẩu hiện tại",type="password")
-    with new_pw: np=st.text_input("Mật khẩu mới",type="password")
-    with new_pw2: np2=st.text_input("Xác nhận",type="password")
-    if st.button("Đổi mật khẩu"):
-        ws=open_ws(spreadsheet_id,"USE");
-        if ws:
-            df=ws_to_df(ws);acc=st.session_state["auth_acc"]
-            row=df[df["USE (mã đăng nhập)"].astype(str)==acc]
-            if row.empty: st.error("Không tìm thấy acc")
-            elif not verify_pw(op,row.iloc[0]["Mật khẩu_băm"]): st.error("Sai mật khẩu hiện tại")
-            elif np!=np2: st.error("Không khớp")
-            else:
-                df.loc[df["USE (mã đăng nhập)"].astype(str)==acc,"Mật khẩu_băm"]=hash_pw(np)
-                df_to_ws(ws,df);st.success("Đổi thành công")
-
-    acc_f=st.text_input("Tài khoản cần cấp mật khẩu tạm")
-    if st.button("Cấp mật khẩu tạm"):
-        ws=open_ws(spreadsheet_id,"USE")
-        if ws:
-            df=ws_to_df(ws)
-            if (df["USE (mã đăng nhập)"].astype(str)==acc_f).any():
-                tmp=uuid.uuid4().hex[:8]
-                df.loc[df["USE (mã đăng nhập)"].astype(str)==acc_f,
-                       ["Mật khẩu_băm","Kích hoạt"]]=[hash_pw(tmp),"1"]
-                df_to_ws(ws,df)
-                wslog=open_ws(spreadsheet_id,"ResetRequests")
-                ensure_headers(wslog,["USE","Tài khoản","Thời điểm","Trạng thái","Ghi chú"])
-                log=ws_to_df(wslog)
-                use_acc=df.loc[df["USE (mã đăng nhập)"].astype(str)==acc_f,"USE (mã đăng nhập)"].iloc[0]
-                log=pd.concat([log,pd.DataFrame([{"USE":use_acc.split("\\")[0], "Tài khoản":acc_f,
-                                                  "Thời điểm":datetime.now().isoformat(timespec='seconds'),
-                                                  "Trạng thái":"Cấp mật khẩu tạm","Ghi chú":"User yêu cầu"}])],
-                              ignore_index=True)
-                df_to_ws(wslog,log)
-                st.success(f"Mật khẩu tạm: {tmp}")
-            else: st.error("Không tồn tại")
-
-    # =========================
-    # Nhập KPI + Ghi KPI_DB
-    # =========================
-    up=st.file_uploader("Chọn CSV/XLSX")
-    if up is not None:
-        df_in=pd.read_csv(up) if up.name.endswith(".csv") else pd.read_excel(up)
-        st.dataframe(df_in)
-        st.session_state["kpi_df"]=df_in
-
-    thang=st.number_input("Tháng",1,12,datetime.now().month)
-    nam=st.number_input("Năm",2000,2100,datetime.now().year)
-
-    def compute_point(r):
-        try:
-            kh=float(r.get("Kế hoạch",0));th=float(r.get("Thực hiện",0));ts=float(r.get("Trọng số",0))
-            tile=th/kh*100 if kh else 0
-            return max(0,min(100,tile))*(ts/100)
-        except: return 0
-
-    if st.button("💾 Ghi KPI_DB"):
-        ws=open_ws(spreadsheet_id,"KPI_DB")
-        if ws:
-            cols=["USE","Đơn vị","Bộ phận/người phụ trách","Tên chỉ tiêu (KPI)","Đơn vị tính",
-                  "Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm","CreatedAt","UpdatedAt"]
-            ensure_headers(ws,cols);cur=ws_to_df(ws)
-            df=st.session_state.get("kpi_df");df["Điểm KPI"]=df.apply(compute_point,axis=1)
-            df["USE"],df["Đơn vị"],df["Tháng"],df["Năm"]=use_login,"",int(thang),int(nam)
-            now=datetime.now().isoformat(timespec='seconds');df["CreatedAt"],df["UpdatedAt"]=now,now
-            out=pd.concat([cur,df[cols]],ignore_index=True);df_to_ws(ws,out)
-            st.success("Đã ghi")
-
-    # =========================
-    # Báo cáo
-    # =========================
-    if st.button("Xuất báo cáo Excel"):
-        ws=open_ws(spreadsheet_id,"KPI_DB")
-        if ws:
-            df=ws_to_df(ws)
-            for c in ["Kế hoạch","Thực hiện","Trọng số","Điểm KPI","Tháng","Năm"]:
-                if c in df.columns: df[c]=pd.to_numeric(df[c],errors="coerce")
-            cur=df[(df["USE"]==use_login)&(df["Tháng"]==int(thang))&(df["Năm"]==int(nam))]
-            prev=df[(df["USE"]==use_login)&(df["Năm"]==int(nam))&(df["Tháng"]==int(thang)-1)] if int(thang)>1 else pd.DataFrame()
-            yoy=df[(df["USE"]==use_login)&(df["Tháng"]==int(thang))&(df["Năm"]==int(nam)-1)]
-            def agg(d):
-                if d.empty: return pd.DataFrame(columns=["Bộ phận","Tổng TS","Tổng điểm","% hoàn thành"])
-                g=d.groupby("Bộ phận/người phụ trách").agg(**{"Tổng TS":("Trọng số","sum"),
-                                                              "Tổng điểm":("Điểm KPI","sum")}).reset_index()
-                g["% hoàn thành"]=g.apply(lambda r:(r["Tổng điểm"]/r["Tổng TS"]*100) if r["Tổng TS"] else 0,axis=1);return g
-            cur_g,prev_g,yoy_g=agg(cur),agg(prev),agg(yoy)
-            out=BytesIO()
-            with pd.ExcelWriter(out,engine="xlsxwriter") as w:
-                cur_g.to_excel(w,index=False,sheet_name="Thang_hien_tai")
-                if not prev_g.empty: prev_g.to_excel(w,index=False,sheet_name="So_thang_truoc")
-                if not yoy_g.empty: yoy_g.to_excel(w,index=False,sheet_name="So_cung_ky")
-            st.download_button("Tải báo cáo",out.getvalue(),
-                               file_name=f"Bao_cao_{use_login}_{nam}_{thang:02d}.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    # =========================
-    # Admin compare
-    # =========================
-    if st.session_state.get("role")=="admin":
-        st.subheader("📈 So sánh KPI các đơn vị")
-        ws=open_ws(spreadsheet_id,"KPI_DB")
-        if ws:
-            df=ws_to_df(ws)
-            if not df.empty:
-                df["Điểm KPI"]=pd.to_numeric(df["Điểm KPI"],errors="coerce")
-                ranking=df.groupby(["USE","Tháng","Năm"]).agg({"Điểm KPI":"sum"}).reset_index()
-                st.dataframe(ranking.sort_values(["Năm","Tháng","Điểm KPI"],ascending=[False,False,False]))
+with tab3:
+    st.subheader("Quản trị / Kiểm tra kết nối")
+    colq1, colq2 = st.columns(2)
+    with colq1:
+        if st.button("Kiểm tra kết nối Google Sheets", use_container_width=True):
+            try:
+                sh = open_spreadsheet(st.session_state["spreadsheet_id"])
+                st.success(f"Kết nối OK: {sh.title}")
+            except Exception as e:
+                st.error(f"Lỗi: {e}")
+    with colq2:
+        st.write("Tên sheet KPI hiện tại:", st.session_state.get("kpi_sheet_name","KPI"))
+    st.caption("Mục này dành cho quản trị: kiểm tra SID, tên sheet KPI, và test kết nối.")
