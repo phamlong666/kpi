@@ -1,13 +1,18 @@
-# -*- coding: utf-8 -*-
+from pathlib import Path
+
+app_code = r'''# -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (CLEAN, no self-writing)
-- Đăng nhập bằng USE từ tab USE của Google Sheet (hỗ trợ alias cột).
-- Quên mật khẩu (cập nhật MK tạm lên Sheet + gửi email nếu có secrets).
-- Đổi mật khẩu (user & admin).
-- Bảng KPI: lọc, sắp xếp, tải Excel.
-- Nhập CSV vào KPI: checkbox chọn dòng + form nhập tay, ghi lên sheet KPI.
+KPI App – Định Hóa (v3, UI + CSV + Drive)
+- Form nhập tay đặt LÊN TRÊN (kèm nút Áp dụng / Ghi CSV / Làm mới CSV / Xuất báo cáo / Lưu dữ liệu).
+- Các nhóm ô cùng hàng: (Đơn vị tính – Bộ phận phụ trách – Kế hoạch),
+  (Thực hiện – Trọng số – Điểm KPI), (Tháng – Năm).
+- "Điểm KPI" tính theo "Phương pháp đo kết quả" nếu có; mặc định theo ratio (Actual/Plan)*10*Weight.
+- "Làm mới bảng CSV" có xác nhận, tránh mất dữ liệu ngoài ý muốn.
+- "Xuất báo cáo": tải Excel & PDF.
+- "Lưu dữ liệu": tạo thư mục "Báo cáo KPI" trong thư mục con theo USE (KVDHA, KVDH, ...)
+  dưới thư mục gốc App_KPI (có thể nhập ID), rồi lưu file "KPI_dd-mm-yy".
 - Nhấn Enter để đăng nhập (st.form).
-- BẮT BUỘC đăng nhập mới vào được khu vực nghiệp vụ.
+- BẮT BUỘC đăng nhập mới vào được nghiệp vụ.
 """
 import re
 import io
@@ -23,18 +28,31 @@ import gspread
 from google.oauth2.service_account import Credentials
 import matplotlib.pyplot as plt
 
+# ========== Thư viện Drive (có thể cần thêm vào requirements: google-api-python-client) ==========
+try:
+    from googleapiclient.discovery import build as gbuild
+    from googleapiclient.http import MediaIoBaseUpload
+except Exception:  # nếu thiếu thư viện, ta sẽ cảnh báo khi dùng
+    gbuild = None
+    MediaIoBaseUpload = None
+
 # ================= CẤU HÌNH =================
 st.set_page_config(page_title="KPI – Định Hóa", layout="wide")
 APP_TITLE = "📊 KPI – Đội quản lý Điện lực khu vực Định Hóa"
-GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"  # có thể thay bằng sheet của anh
+GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"
 KPI_SHEET_DEFAULT = "KPI"
 ADMIN_ACCOUNTS = {r"pctn\\admin", r"npc\\longph"}
 FORGOT_TARGET_EMAIL = "phamlong666@gmail.com"
+
+# Thư mục gốc App_KPI trên Drive (có thể thay bằng ID của anh)
+APP_KPI_DRIVE_ROOT_ID_DEFAULT = "1rE3E8CuPViw8-VYWYZgeB4Mz9WEY3e7"
 
 if "spreadsheet_id" not in st.session_state:
     st.session_state["spreadsheet_id"] = GOOGLE_SHEET_ID_DEFAULT
 if "kpi_sheet_name" not in st.session_state:
     st.session_state["kpi_sheet_name"] = KPI_SHEET_DEFAULT
+if "drive_root_id" not in st.session_state:
+    st.session_state["drive_root_id"] = APP_KPI_DRIVE_ROOT_ID_DEFAULT
 
 # ================= TIỆN ÍCH =================
 def toast(msg, icon="ℹ️"):
@@ -64,15 +82,17 @@ def get_gs_client():
         scopes = ["https://www.googleapis.com/auth/spreadsheets",
                   "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(svc, scopes=scopes)
-        return gspread.authorize(creds)
+        return gspread.authorize(creds), creds
     except Exception as e:
         st.session_state["_gs_error"] = f"SECRETS_ERROR: {e}"
-        return None
+        return None, None
 
 def open_spreadsheet(sid_or_url: str):
     sid = extract_sheet_id(sid_or_url or GOOGLE_SHEET_ID_DEFAULT) or GOOGLE_SHEET_ID_DEFAULT
-    client = st.session_state.get("_gs_client") or get_gs_client()
-    st.session_state["_gs_client"] = client
+    client, _ = st.session_state.get("_gs_pair", (None, None))
+    if client is None:
+        client, creds = get_gs_client()
+        st.session_state["_gs_pair"] = (client, creds)
     if client is None:
         raise RuntimeError("no_client")
     return client.open_by_key(sid)
@@ -93,7 +113,7 @@ ALIAS = {
     # KPI
     "Tên chỉ tiêu (KPI)": ["Tên chỉ tiêu (KPI)","Tên KPI","Chỉ tiêu"],
     "Đơn vị tính": ["Đơn vị tính","Unit"],
-    "Kế hoạch": ["Kế hoạch","Plan","Target"],
+    "Kế hoạch": ["Kế hoạch","Plan","Target", "Kế hoạch (tháng)"],
     "Thực hiện": ["Thực hiện","Thực hiện (tháng)","Actual (month)"],
     "Trọng số": ["Trọng số","Weight"],
     "Bộ phận/người phụ trách": ["Bộ phận/người phụ trách","Phụ trách"],
@@ -102,6 +122,9 @@ ALIAS = {
     "Điểm KPI": ["Điểm KPI","Score"],
     "Ghi chú": ["Ghi chú","Notes"],
     "Tên đơn vị": ["Tên đơn vị","Đơn vị"],
+    "Phương pháp đo kết quả": ["Phương pháp đo kết quả","Cách tính","Công thức"],
+    "Ngưỡng dưới": ["Ngưỡng dưới","Min"],
+    "Ngưỡng trên": ["Ngưỡng trên","Max"],
 }
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -116,10 +139,14 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
                 rename[cols_lower[key]] = std
                 break
     if rename: df = df.rename(columns=rename)
+    # Chuẩn: "Thực hiện (tháng)" -> "Thực hiện"; "Kế hoạch (tháng)" -> "Kế hoạch"
+    if "Thực hiện (tháng)" in df.columns and "Thực hiện" not in df.columns:
+        df = df.rename(columns={"Thực hiện (tháng)":"Thực hiện"})
+    if "Kế hoạch (tháng)" in df.columns and "Kế hoạch" not in df.columns:
+        df = df.rename(columns={"Kế hoạch (tháng)":"Kế hoạch"})
     return df
 
 def find_use_ws_and_cols(sh):
-    """Trả về (ws, idx_col_use, idx_col_pwd, headers)."""
     try:
         ws = sh.worksheet("USE")
     except Exception:
@@ -148,7 +175,7 @@ def find_use_ws_and_cols(sh):
 
 def load_users(spreadsheet_id_or_url: str = "") -> pd.DataFrame:
     sid = extract_sheet_id(spreadsheet_id_or_url) or GOOGLE_SHEET_ID_DEFAULT
-    client = get_gs_client()
+    client, _ = get_gs_client()
     if client is not None and sid:
         try:
             sh = client.open_by_key(sid)
@@ -179,67 +206,116 @@ def check_credentials(df: pd.DataFrame, use_input: str, pwd_input: str) -> bool:
         return False
     return True
 
-def generate_temp_password(n=10) -> str:
-    chars = string.ascii_letters + string.digits
-    return "".join(random.choice(chars) for _ in range(n))
+def compute_score_generic(plan, actual, weight):
+    if plan in (None, 0) or actual is None: 
+        return None
+    ratio = max(min(actual/plan, 2.0), 0.0)
+    w = weight/100.0 if weight and weight>1 else (weight or 0.0)
+    return round(ratio*10*w, 2)
 
-def update_password_on_sheet(user_use: str, new_password: str, spreadsheet_id_or_url: str = "") -> dict:
-    diag = {'ok': False, 'row': None, 'col_pwd': None, 'message': ""}
+def parse_float(x):
+    try: return float(str(x).replace(",", "."))
+    except: return None
+
+def compute_score_with_method(row):
+    plan = parse_float(row.get("Kế hoạch"))
+    actual = parse_float(row.get("Thực hiện"))
+    weight = parse_float(row.get("Trọng số")) or 0.0
+    method = str(row.get("Phương pháp đo kết quả") or "").strip().lower()
+
+    if not method:
+        return compute_score_generic(plan, actual, weight)
+    if plan in (None, 0) or actual is None:
+        return None
+
+    w = weight/100.0 if weight and weight>1 else (weight or 0.0)
+
+    # Các cách tính điển hình
+    if any(k in method for k in ["tăng", ">=", "cao hơn tốt", "increase", "higher"]):
+        ratio = max(min(actual/plan, 2.0), 0.0)
+        return round(ratio*10*w, 2)
+
+    if any(k in method for k in ["giảm", "<=", "thấp hơn tốt", "decrease", "lower"]):
+        if actual <= plan: ratio = 1.0
+        else: ratio = max(min(plan/actual, 2.0), 0.0)
+        return round(ratio*10*w, 2)
+
+    if any(k in method for k in ["đạt", "dat", "bool", "pass/fail"]):
+        ok = actual >= plan
+        return round((10.0 if ok else 0.0)*w, 2)
+
+    if any(k in method for k in ["khoảng", "range", "trong khoảng"]):
+        lo = parse_float(row.get("Ngưỡng dưới"))
+        hi = parse_float(row.get("Ngưỡng trên"))
+        if lo is None or hi is None:
+            return compute_score_generic(plan, actual, weight)
+        ok = (lo <= actual <= hi)
+        return round((10.0 if ok else 0.0)*w, 2)
+
+    # Mặc định
+    return compute_score_generic(plan, actual, weight)
+
+def generate_pdf_from_df(df: pd.DataFrame, title: str = "BÁO CÁO KPI") -> bytes:
+    # Tạo PDF đơn giản bằng reportlab (cần gói reportlab trong requirements)
     try:
-        sh = open_spreadsheet(spreadsheet_id_or_url or GOOGLE_SHEET_ID_DEFAULT)
-        ws, idx_use, idx_pwd, headers = find_use_ws_and_cols(sh)
-        values = ws.col_values(idx_use)
-        row_number = None
-        needle = str(user_use).strip().lower()
-        for i, v in enumerate(values, start=1):
-            if i == 1:  # header
-                continue
-            if str(v).strip().lower() == needle:
-                row_number = i
-                break
-        if not row_number:
-            diag['message'] = "Không tìm thấy USE trên sheet."
-            return diag
-        ws.update_cell(row_number, idx_pwd, new_password)
-        diag.update({'ok': True, 'row': row_number, 'col_pwd': idx_pwd, 'message': "Đã cập nhật MK trên sheet."})
-        return diag
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.pdfgen import canvas
+        from reportlab.lib import colors
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
+        styles = getSampleStyleSheet()
+        story = [Paragraph(title, styles["Title"]), Spacer(1, 0.3*cm)]
+
+        cols = list(df.columns)
+        data = [cols] + df.fillna("").astype(str).values.tolist()
+        t = Table(data, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+            ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("ALIGN", (0,0), (-1,-1), "CENTER"),
+        ]))
+        story.append(t)
+        doc.build(story)
+        return buf.getvalue()
     except Exception as e:
-        diag['message'] = f"Lỗi cập nhật sheet: {e}"
-        return diag
+        st.warning("Thiếu gói reportlab để xuất PDF. Vui lòng thêm 'reportlab' vào requirements.")
+        return b""
 
-def send_email(subject: str, body: str, to_email: str) -> dict:
-    try:
-        user = st.secrets["email"]["EMAIL_USER"]
-        pwd  = st.secrets["email"]["EMAIL_PASS"]
-        server_name = st.secrets["email"].get("SMTP_SERVER", "smtp.gmail.com")
-        port = int(st.secrets["email"].get("SMTP_PORT", 465))
-    except Exception:
-        toast("(Giả lập) Đã gửi email: " + subject, "✉️")
-        return {'ok': True, 'mode': 'mock', 'message': 'Giả lập gửi email (thiếu secrets[email]).'}
+# ================= Drive helpers =================
+def get_drive_service():
+    if gbuild is None:
+        st.error("Thiếu thư viện 'google-api-python-client' để lưu lên Google Drive.")
+        return None
+    _client, creds = st.session_state.get("_gs_pair", (None, None))
+    if creds is None:
+        _, creds = get_gs_client()
+        st.session_state["_gs_pair"] = (st.session_state.get("_gs_pair", (None,None))[0], creds)
+    if creds is None:
+        return None
+    return gbuild("drive", "v3", credentials=creds)
 
-    try:
-        msg = MIMEMultipart()
-        msg["Subject"] = subject
-        msg["From"] = user
-        msg["To"] = to_email
-        msg.attach(MIMEText(body, "plain", "utf-8"))
+def ensure_folder(service, parent_id: str, name: str) -> str:
+    q = f"mimeType='application/vnd.google-apps.folder' and name='{name}' and '{parent_id}' in parents and trashed=false"
+    res = service.files().list(q=q, spaces="drive", fields="files(id,name)").execute()
+    items = res.get("files", [])
+    if items:
+        return items[0]["id"]
+    file_metadata = {"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]}
+    folder = service.files().create(body=file_metadata, fields="id").execute()
+    return folder["id"]
 
-        if port == 465:
-            import smtplib
-            with smtplib.SMTP_SSL(server_name, port) as server:
-                server.login(user, pwd)
-                server.sendmail(user, [to_email], msg.as_string())
-        else:
-            import smtplib
-            with smtplib.SMTP(server_name, port) as server:
-                server.starttls()
-                server.login(user, pwd)
-                server.sendmail(user, [to_email], msg.as_string())
-        return {'ok': True, 'mode': 'smtp', 'message': 'Đã gửi email bằng SMTP.'}
-    except Exception as e:
-        return {'ok': False, 'mode': 'smtp', 'message': f"Lỗi gửi email: {e}"}
+def upload_bytes(service, parent_id: str, filename: str, data: bytes, mime: str) -> str:
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
+    file_metadata = {"name": filename, "parents": [parent_id]}
+    f = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+    return f["id"]
 
-# ================= SIDEBAR (LOGIN/LOGOUT) =================
+# ================= SIDEBAR (LOGIN/LOGOUT + Drive root) =================
 with st.sidebar:
     st.header("🔒 Đăng nhập")
 
@@ -248,92 +324,17 @@ with st.sidebar:
             use_input = st.text_input("USE (vd: PCTN\\KVDHA)", key="login_use")
             pwd_input = st.text_input("Mật khẩu", type="password", key="login_pwd")
             login_submit = st.form_submit_button("Đăng nhập", use_container_width=True)
-        c1, c2 = st.columns([1,1])
-        with c1:
-            forgot_use = st.text_input("USE để cấp MK tạm", key="forgot_use")
-        with c2:
-            forgot_clicked = st.button("Quên mật khẩu", use_container_width=True, key="btn_forgot")
-
         if login_submit:
             df_users = load_users(st.session_state.get("spreadsheet_id",""))
             if check_credentials(df_users, use_input, pwd_input):
                 st.session_state["_user"] = use_input
-                toast("Chào mừng bạn vào làm việc, chúc bạn luôn vui vẻ nhé! 🌟", "✅")
+                toast("Đăng nhập thành công.", "✅")
                 st.rerun()
-
-        if forgot_clicked:
-            u = (forgot_use or "").strip()
-            if not u:
-                toast("Nhập USE trước khi bấm 'Quên mật khẩu'.", "❗")
-            else:
-                temp_pw = generate_temp_password(10)
-                res_sheet = update_password_on_sheet(u, temp_pw, st.session_state.get("spreadsheet_id",""))
-                subject = f"[KPI Định Hóa] Mật khẩu tạm cho {u}"
-                body = f"Chào anh/chị,\n\nHệ thống KPI đã tạo mật khẩu tạm cho tài khoản: {u}\nMật khẩu tạm: {temp_pw}\n\nVui lòng đăng nhập và đổi mật khẩu ngay trong mục Quản trị.\nTrân trọng."
-                res_mail = send_email(subject, body, FORGOT_TARGET_EMAIL)
-
-                if res_sheet['ok'] and res_mail['ok']:
-                    st.success(f"✅ ĐÃ CẤP MẬT KHẨU TẠM cho USE: {u}. (Sheet dòng {res_sheet['row']}, cột MK {res_sheet['col_pwd']}; Email: {res_mail['mode']})")
-                elif res_sheet['ok'] and not res_mail['ok']:
-                    st.warning(f"MK tạm đã cập nhật trên Sheet (dòng {res_sheet['row']}), nhưng email lỗi: {res_mail['message']}")
-                elif not res_sheet['ok'] and res_mail['ok']:
-                    st.warning(f"ĐÃ GỬI EMAIL mật khẩu tạm, nhưng cập nhật Sheet thất bại: {res_sheet['message']}")
-                else:
-                    st.error(f"Không cấp được MK tạm. Lỗi Sheet: {res_sheet['message']} | Lỗi email: {res_mail['message']}")
-
     else:
-        st.success("Chào mừng bạn vào làm việc, chúc bạn luôn vui vẻ nhé!")
-        st.write(f"👤 Đang đăng nhập: **{st.session_state['_user']}**")
-        logout_clicked = st.button("Đăng xuất", use_container_width=True, key="btn_logout")
-        if logout_clicked:
-            st.session_state.pop("_user", None)
-            toast("Đã đăng xuất.", "✅")
-            st.rerun()
-
-        with st.expander("🔐 Đổi mật khẩu (Chính chủ)"):
-            old_pw_me = st.text_input("Mật khẩu hiện tại", type="password", key="me_old")
-            new_pw_me = st.text_input("Mật khẩu mới", type="password", key="me_new")
-            new_pw2_me = st.text_input("Nhập lại mật khẩu mới", type="password", key="me_new2")
-            me_change = st.button("Cập nhật mật khẩu của tôi", type="primary", key="me_change_btn")
-            if me_change:
-                df_users = load_users(st.session_state.get("spreadsheet_id",""))
-                if not check_credentials(df_users, st.session_state["_user"], old_pw_me):
-                    st.error("Mật khẩu hiện tại không đúng.")
-                elif not new_pw_me or new_pw_me != new_pw2_me:
-                    st.error("Mật khẩu mới không khớp.")
-                else:
-                    res_sheet = update_password_on_sheet(st.session_state["_user"], new_pw_me, st.session_state.get("spreadsheet_id",""))
-                    if res_sheet['ok']:
-                        st.success("✅ Đã đổi mật khẩu thành công (đã cập nhật Google Sheet).")
-                        try:
-                            send_email("[KPI Định Hóa] Đổi mật khẩu thành công",
-                                       f"Tài khoản {st.session_state['_user']} vừa đổi mật khẩu thành công.",
-                                       FORGOT_TARGET_EMAIL)
-                        except Exception:
-                            pass
-                    else:
-                        st.error(f"Đổi mật khẩu thất bại: {res_sheet['message']}")
-
-        if is_admin(st.session_state["_user"]):
-            with st.expander("🛠 Đổi mật khẩu cho người dùng (Admin)"):
-                target_use = st.text_input("USE cần đổi", value="", key="admin_target")
-                new_pw_adm = st.text_input("Mật khẩu mới", type="password", key="adm_new")
-                apply_clicked = st.button("Áp dụng", type="primary", key="adm_apply")
-                if apply_clicked:
-                    if not target_use or not new_pw_adm:
-                        st.error("Nhập đủ USE và mật khẩu mới.")
-                    else:
-                        res_sheet = update_password_on_sheet(target_use, new_pw_adm, st.session_state.get("spreadsheet_id",""))
-                        if res_sheet['ok']:
-                            st.success(f"✅ Đã đổi mật khẩu cho {target_use} (dòng {res_sheet['row']}).")
-                            try:
-                                send_email("[KPI Định Hóa] Admin đổi mật khẩu",
-                                           f"Admin đã đổi mật khẩu cho tài khoản {target_use}.",
-                                           FORGOT_TARGET_EMAIL)
-                            except Exception:
-                                pass
-                        else:
-                            st.error(f"Đổi mật khẩu thất bại: {res_sheet['message']}")
+        st.success(f"Đang đăng nhập: **{st.session_state['_user']}**")
+        st.text_input("ID thư mục gốc App_KPI (Drive)", key="drive_root_id")
+        if st.button("Đăng xuất", use_container_width=True):
+            st.session_state.pop("_user", None); toast("Đã đăng xuất.", "✅"); st.rerun()
 
 # ================= GATING CHÍNH =================
 st.title(APP_TITLE)
@@ -343,49 +344,23 @@ if "_user" not in st.session_state:
 
 # ================= KPI CORE =================
 KPI_COLS = ["Tên chỉ tiêu (KPI)","Đơn vị tính","Kế hoạch","Thực hiện","Trọng số",
-            "Bộ phận/người phụ trách","Tháng","Năm","Điểm KPI","Ghi chú","Tên đơn vị"]
-
-def safe_float(x):
-    try:
-        s = str(x).replace(",",".")
-        return float(s)
-    except Exception:
-        return None
-
-def compute_score(row):
-    plan = safe_float(row.get("Kế hoạch"))
-    actual = safe_float(row.get("Thực hiện") or row.get("Thực hiện (tháng)"))
-    weight = safe_float(row.get("Trọng số")) or 0.0
-    if plan in (None,0) or actual is None: return None
-    ratio = max(min(actual/plan, 2.0), 0.0)
-    w = weight/100.0 if weight and weight>1 else (weight or 0.0)
-    return round(ratio*10*w, 2)
+            "Bộ phận/người phụ trách","Tháng","Năm","Phương pháp đo kết quả",
+            "Ngưỡng dưới","Ngưỡng trên","Điểm KPI","Ghi chú","Tên đơn vị"]
 
 def read_kpi_from_sheet(sh, sheet_name: str):
     try:
         ws = sh.worksheet(sheet_name)
     except Exception:
-        ws = None
-        for w in sh.worksheets():
-            hdr = [h.strip() for h in w.row_values(1)]
-            if ("Kế hoạch" in hdr) and ("Thực hiện" in hdr or "Thực hiện (tháng)" in hdr):
-                ws = w; break
-        if ws is None: return pd.DataFrame()
-    df = df_from_ws(ws)
-    df = normalize_columns(df)
-    if "Thực hiện (tháng)" in df.columns and "Thực hiện" not in df.columns:
-        df = df.rename(columns={"Thực hiện (tháng)":"Thực hiện"})
+        return pd.DataFrame()
+    df = normalize_columns(df_from_ws(ws))
     if "Điểm KPI" not in df.columns:
-        df["Điểm KPI"] = df.apply(compute_score, axis=1)
+        df["Điểm KPI"] = df.apply(compute_score_with_method, axis=1)
     return df
 
 def write_kpi_to_sheet(sh, sheet_name: str, df: pd.DataFrame):
-    df = df.copy()
-    df = normalize_columns(df)
-    if "Thực hiện (tháng)" in df.columns and "Thực hiện" not in df.columns:
-        df = df.rename(columns={"Thực hiện (tháng)":"Thực hiện"})
+    df = normalize_columns(df.copy())
     if "Điểm KPI" not in df.columns:
-        df["Điểm KPI"] = df.apply(compute_score, axis=1)
+        df["Điểm KPI"] = df.apply(compute_score_with_method, axis=1)
     cols = [c for c in KPI_COLS if c in df.columns] + [c for c in df.columns if c not in KPI_COLS]
     data = [cols] + df[cols].fillna("").astype(str).values.tolist()
     try:
@@ -406,106 +381,205 @@ def get_sheet_and_name():
     sh = open_spreadsheet(sid_cfg)
     return sh, sheet_name
 
-# ================= TABS =================
-tab1, tab2 = st.tabs(["📋 Bảng KPI","⬆️ Nhập CSV vào KPI"])
+# ================= TAB CSV (kèm form trên) =================
+st.subheader("⬆️ Nhập CSV vào KPI")
 
-with tab1:
-    st.subheader("Bảng KPI")
+# Khu vực FORM NHẬP TAY nằm TRÊN
+with st.container(border=True):
+    st.markdown("#### ✍️ Biểu mẫu nhập tay (áp dụng cho dòng đang chọn hoặc thêm mới)")
+    # Lấy danh sách cột chuẩn
+    def _get_form_state():
+        if "_csv_form" not in st.session_state:
+            st.session_state["_csv_form"] = {
+                "Tên chỉ tiêu (KPI)": "", "Đơn vị tính": "", "Kế hoạch": 0.0,
+                "Thực hiện": 0.0, "Trọng số": 0.0, "Bộ phận/người phụ trách": "",
+                "Tháng": str(datetime.now().month), "Năm": str(datetime.now().year),
+                "Phương pháp đo kết quả": "Tăng tốt hơn", "Ngưỡng dưới":"", "Ngưỡng trên":"",
+                "Ghi chú":"", "Tên đơn vị": ""
+            }
+        return st.session_state["_csv_form"]
+    f = _get_form_state()
+
+    c0 = st.columns([2,1,1,1])  # Tên chỉ tiêu dài hơn
+    with c0[0]:
+        f["Tên chỉ tiêu (KPI)"] = st.text_input("Tên chỉ tiêu (KPI)", value=f["Tên chỉ tiêu (KPI)"])
+    with c0[1]:
+        f["Đơn vị tính"] = st.text_input("Đơn vị tính", value=f["Đơn vị tính"])
+    with c0[2]:
+        f["Bộ phận/người phụ trách"] = st.text_input("Bộ phận/người phụ trách", value=f["Bộ phận/người phụ trách"])
+    with c0[3]:
+        f["Tên đơn vị"] = st.text_input("Tên đơn vị", value=f["Tên đơn vị"])
+
+    c1 = st.columns(3)  # Cùng 1 hàng: Kế hoạch - Thực hiện - Trọng số
+    with c1[0]:
+        f["Kế hoạch"] = st.number_input("Kế hoạch", value=float(f.get("Kế hoạch") or 0.0))
+    with c1[1]:
+        f["Thực hiện"] = st.number_input("Thực hiện", value=float(f.get("Thực hiện") or 0.0))
+    with c1[2]:
+        f["Trọng số"] = st.number_input("Trọng số (%)", value=float(f.get("Trọng số") or 0.0))
+
+    c2 = st.columns(3)  # Cùng 1 hàng: Phương pháp - Điểm KPI - Ghi chú
+    with c2[0]:
+        f["Phương pháp đo kết quả"] = st.selectbox("Phương pháp đo kết quả",
+            options=["Tăng tốt hơn","Giảm tốt hơn","Đạt/Không đạt","Trong khoảng"],
+            index=["Tăng tốt hơn","Giảm tốt hơn","Đạt/Không đạt","Trong khoảng"].index(f.get("Phương pháp đo kết quả","Tăng tốt hơn")) if f.get("Phương pháp đo kết quả") in ["Tăng tốt hơn","Giảm tốt hơn","Đạt/Không đạt","Trong khoảng"] else 0
+        )
+    with c2[1]:
+        # Tính điểm động
+        _tmp_row = {k:f.get(k) for k in f.keys()}
+        _tmp_row["Điểm KPI"] = compute_score_with_method(_tmp_row)
+        st.metric("Điểm KPI (tự tính)", _tmp_row["Điểm KPI"] if _tmp_row["Điểm KPI"] is not None else "—")
+    with c2[2]:
+        f["Ghi chú"] = st.text_input("Ghi chú", value=f["Ghi chú"])
+
+    if f["Phương pháp đo kết quả"] == "Trong khoảng":
+        c3 = st.columns(2)
+        with c3[0]:
+            f["Ngưỡng dưới"] = st.text_input("Ngưỡng dưới", value=str(f.get("Ngưỡng dưới") or ""))
+        with c3[1]:
+            f["Ngưỡng trên"] = st.text_input("Ngưỡng trên", value=str(f.get("Ngưỡng trên") or ""))
+
+    c4 = st.columns(2)  # Cùng hàng: Tháng - Năm
+    with c4[0]:
+        f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
+    with c4[1]:
+        f["Năm"] = st.text_input("Năm", value=str(f["Năm"]))
+
+    c_btn = st.columns([1,1,1,1,2])
+    apply_clicked = c_btn[0].button("Áp dụng vào bảng CSV tạm", type="primary", use_container_width=True)
+    save_csv_clicked = c_btn[1].button("💾 Ghi CSV tạm vào sheet KPI", use_container_width=True)
+    refresh_clicked = c_btn[2].button("🔁 Làm mới bảng CSV", use_container_width=True)
+    export_clicked = c_btn[3].button("📤 Xuất báo cáo (Excel/PDF)", use_container_width=True)
+    save_drive_clicked = c_btn[4].button("☁️ Lưu dữ liệu vào Google Drive", use_container_width=True)
+
+# Tải CSV dưới FORM
+up = st.file_uploader("Tải file CSV", type=["csv"])
+
+# Khởi tạo cache CSV
+if "_csv_cache" not in st.session_state:
+    st.session_state["_csv_cache"] = pd.DataFrame(columns=KPI_COLS)
+
+# Đọc CSV nếu có
+if up is not None:
+    try:
+        df_csv = pd.read_csv(up)
+    except Exception:
+        up.seek(0)
+        df_csv = pd.read_csv(up, encoding="utf-8-sig")
+    df_csv = normalize_columns(df_csv)
+    if "Điểm KPI" not in df_csv.columns:
+        df_csv["Điểm KPI"] = df_csv.apply(compute_score_with_method, axis=1)
+    st.session_state["_csv_cache"] = df_csv[KPI_COLS[:len(df_csv.columns)]] if all(c in df_csv.columns for c in KPI_COLS) else df_csv
+
+# Bảng CSV có checkbox chọn dòng
+df_show = st.session_state["_csv_cache"].copy()
+if "✓ Chọn" not in df_show.columns:
+    df_show.insert(0, "✓ Chọn", False)
+
+st.write("Chọn tích một dòng để đưa dữ liệu lên biểu mẫu phía trên:")
+df_edit = st.data_editor(
+    df_show,
+    use_container_width=True,
+    hide_index=True,
+    num_rows="dynamic",
+    key="csv_editor"
+)
+st.session_state["_csv_cache"] = df_edit.drop(columns=["✓ Chọn"], errors="ignore")
+
+# Khi chọn dòng → nạp lên form
+selected_rows = df_edit[df_edit["✓ Chọn"] == True]
+if not selected_rows.empty:
+    row = selected_rows.iloc[0].drop(labels=["✓ Chọn"], errors="ignore").to_dict()
+    for k in [c for c in KPI_COLS if c in row]:
+        st.session_state["_csv_form"][k] = row.get(k, st.session_state["_csv_form"].get(k))
+
+# XỬ LÝ NÚT: Áp dụng / Ghi CSV / Làm mới / Xuất / Lưu Drive
+if apply_clicked:
+    # cập nhật vào dòng đầu tiên được tích, nếu không có thì append
+    base = st.session_state["_csv_cache"].copy()
+    new_row = {c: st.session_state["_csv_form"].get(c, "") for c in KPI_COLS}
+    # Tính điểm theo phương pháp
+    new_row["Điểm KPI"] = compute_score_with_method(new_row)
+    if not selected_rows.empty:
+        idx = selected_rows.index[0]
+        for k, v in new_row.items():
+            base.loc[idx, k] = v
+    else:
+        base = pd.concat([base, pd.DataFrame([new_row])], ignore_index=True)
+    st.session_state["_csv_cache"] = base
+    toast("Đã áp dụng dữ liệu biểu mẫu vào CSV tạm.", "✅")
+    st.rerun()
+
+if save_csv_clicked:
     try:
         sh, sheet_name = get_sheet_and_name()
-        df_kpi = read_kpi_from_sheet(sh, sheet_name)
+        ok = write_kpi_to_sheet(sh, sheet_name, st.session_state["_csv_cache"])
+        if ok: toast("Đã ghi dữ liệu CSV vào sheet KPI.", "✅")
     except Exception as e:
-        st.error(f"Không đọc được KPI: {e}")
-        df_kpi = pd.DataFrame()
+        st.error(f"Lưu thất bại: {e}")
 
-    if not df_kpi.empty:
-        months = ["Tất cả"] + sorted(df_kpi.get("Tháng", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
-        years  = ["Tất cả"] + sorted(df_kpi.get("Năm", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
-        colf1, colf2, colf3 = st.columns([1,1,2])
-        with colf1:
-            m = st.selectbox("Tháng", options=months, index=0)
-        with colf2:
-            y = st.selectbox("Năm", options=years, index=0)
-        if m!="Tất cả" and "Tháng" in df_kpi.columns: df_kpi = df_kpi[df_kpi["Tháng"].astype(str)==str(m)]
-        if y!="Tất cả" and "Năm" in df_kpi.columns:   df_kpi = df_kpi[df_kpi["Năm"].astype(str)==str(y)]
-
-        if "Tên đơn vị" in df_kpi.columns:
-            units = ["Tất cả"] + sorted(df_kpi["Tên đơn vị"].dropna().astype(str).unique().tolist())
-            unit = st.selectbox("Đơn vị", options=units, index=0)
-            if unit!="Tất cả": df_kpi = df_kpi[df_kpi["Tên đơn vị"].astype(str)==unit]
-
-        if "Điểm KPI" in df_kpi.columns:
-            if st.checkbox("Sắp xếp theo Điểm KPI (giảm dần)", True):
-                df_kpi = df_kpi.sort_values(by="Điểm KPI", ascending=False)
-
-        st.dataframe(df_kpi, use_container_width=True, hide_index=True)
-
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-            df_kpi.to_excel(writer, sheet_name="KPI", index=False)
-        st.download_button("⬇️ Tải Excel", data=buf.getvalue(), file_name="KPI_export.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+if refresh_clicked:
+    # Xác nhận
+    if "confirm_refresh" not in st.session_state:
+        st.session_state["confirm_refresh"] = True
     else:
-        st.info("Chưa có dữ liệu KPI hoặc Admin chưa cấu hình sheet.")
+        st.session_state["confirm_refresh"] = not st.session_state["confirm_refresh"]
 
-with tab2:
-    st.subheader("Nhập CSV vào KPI")
-    st.caption("CSV gợi ý: 'Tên chỉ tiêu (KPI)', 'Đơn vị tính', 'Kế hoạch', 'Thực hiện', 'Trọng số', 'Bộ phận/người phụ trách', 'Tháng', 'Năm', 'Ghi chú', 'Tên đơn vị'.")
-    up = st.file_uploader("Tải file CSV", type=["csv"])
-    if up is not None:
-        try:
-            df_csv = pd.read_csv(up)
-        except Exception:
-            up.seek(0)
-            df_csv = pd.read_csv(up, encoding="utf-8-sig")
-        df_csv = normalize_columns(df_csv)
-        if "Thực hiện (tháng)" in df_csv.columns and "Thực hiện" not in df_csv.columns:
-            df_csv = df_csv.rename(columns={"Thực hiện (tháng)":"Thực hiện"})
-        if "Điểm KPI" not in df_csv.columns:
-            df_csv["Điểm KPI"] = df_csv.apply(compute_score, axis=1)
+if st.session_state.get("confirm_refresh", False):
+    with st.expander("❓ Bạn xác định làm mới dữ liệu chứ? (Sẽ mất những thay đổi chưa ghi)", expanded=True):
+        colc = st.columns(2)
+        if colc[0].button("Có, làm mới ngay", type="primary"):
+            st.session_state["_csv_cache"] = pd.DataFrame(columns=KPI_COLS)
+            st.session_state["confirm_refresh"] = False
+            toast("Đã làm mới bảng CSV tạm.", "✅")
+            st.rerun()
+        if colc[1].button("Không, giữ nguyên dữ liệu"):
+            st.session_state["confirm_refresh"] = False
+            toast("Đã hủy làm mới.", "ℹ️")
 
-        if "_csv_cache" not in st.session_state:
-            st.session_state["_csv_cache"] = df_csv.copy()
-        df_show = st.session_state["_csv_cache"].copy()
-        if "✓ Chọn" not in df_show.columns:
-            df_show.insert(0, "✓ Chọn", False)
+if export_clicked:
+    # Tạo Excel
+    buf_xlsx = io.BytesIO()
+    with pd.ExcelWriter(buf_xlsx, engine="xlsxwriter") as writer:
+        st.session_state["_csv_cache"].to_excel(writer, index=False, sheet_name="KPI")
+    st.download_button("⬇️ Tải Excel báo cáo", data=buf_xlsx.getvalue(), file_name="KPI_baocao.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    # Tạo PDF
+    pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], title="BÁO CÁO KPI")
+    if pdf_bytes:
+        st.download_button("⬇️ Tải PDF báo cáo", data=pdf_bytes, file_name="KPI_baocao.pdf", mime="application/pdf")
 
-        st.write("Chọn tích một dòng để xem/chỉnh bên dưới:")
-        df_edit = st.data_editor(
-            df_show,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="dynamic",
-            key="csv_editor"
-        )
-        st.session_state["_csv_cache"] = df_edit
+if save_drive_clicked:
+    service = get_drive_service()
+    if service is None:
+        st.stop()
+    try:
+        # Xác định thư mục theo USE
+        use_code = st.session_state["_user"].split("\\")[-1].upper()
+        root_id = st.session_state.get("drive_root_id") or APP_KPI_DRIVE_ROOT_ID_DEFAULT
+        folder_user = ensure_folder(service, root_id, use_code)
+        folder_report = ensure_folder(service, folder_user, "Báo cáo KPI")
 
-        selected_rows = df_edit[df_edit["✓ Chọn"] == True]
-        if not selected_rows.empty:
-            row = selected_rows.iloc[0].drop(labels=["✓ Chọn"], errors="ignore")
-            st.success("Đã chọn 1 dòng. Nhập tay các giá trị cột:")
-            with st.form("csv_row_editor"):
-                edited_vals = {}
-                for col_name, val in row.items():
-                    if isinstance(val, (int, float)) and not pd.isna(val):
-                        new_val = st.number_input(col_name, value=float(val))
-                    else:
-                        new_val = st.text_input(col_name, value="" if pd.isna(val) else str(val))
-                    edited_vals[col_name] = new_val
-                submit_csv = st.form_submit_button("Áp dụng vào bảng CSV tạm")
-            if submit_csv:
-                idx = selected_rows.index[0]
-                for k, v in edited_vals.items():
-                    st.session_state["_csv_cache"].loc[idx, k] = v
-                toast("Đã cập nhật giá trị vào bảng CSV tạm.", "✅")
+        ts = datetime.now().strftime("%d-%m-%y")
+        fname_xlsx = f"KPI_{ts}.xlsx"
+        fname_pdf  = f"KPI_{ts}.pdf"
 
-        save_clicked = st.button("💾 Ghi toàn bộ CSV (đã chỉnh) vào sheet KPI", use_container_width=True, type="primary")
-        if save_clicked:
-            try:
-                sh, sheet_name = get_sheet_and_name()
-                ok = write_kpi_to_sheet(sh, sheet_name, st.session_state["_csv_cache"].drop(columns=["✓ Chọn"], errors="ignore"))
-                if ok: toast("Đã ghi dữ liệu CSV vào sheet KPI.", "✅")
-            except Exception as e:
-                st.error(f"Lưu thất bại: {e}")
-    else:
-        st.caption("Chưa tải CSV.")
+        # Excel bytes
+        buf_xlsx = io.BytesIO()
+        with pd.ExcelWriter(buf_xlsx, engine="xlsxwriter") as writer:
+            st.session_state["_csv_cache"].to_excel(writer, index=False, sheet_name="KPI")
+        upload_bytes(service, folder_report, fname_xlsx, buf_xlsx.getvalue(),
+                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        # PDF bytes
+        pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], title=f"BÁO CÁO KPI – {use_code}")
+        if pdf_bytes:
+            upload_bytes(service, folder_report, fname_pdf, pdf_bytes, "application/pdf")
+
+        toast(f"Đã lưu vào Google Drive /{use_code}/Báo cáo KPI/{fname_xlsx} & {fname_pdf}", "✅")
+    except Exception as e:
+        st.error(f"Lưu Google Drive thất bại: {e}")
+'''
+
+Path("/mnt/data/app.py").write_text(app_code, encoding="utf-8")
+print("Wrote enhanced app.py (KB):", round(Path('/mnt/data/app.py').stat().st_size/1024,1))
