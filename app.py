@@ -1,14 +1,12 @@
-from pathlib import Path
-
-app_code = r'''# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.2 CLEAN, Sheets+Drive ổn định)
+KPI App – Định Hóa (v3.2 CLEAN)
 - Form nhập tay đặt TRÊN; bố cục theo hàng ngang.
 - Điểm KPI tính theo "Phương pháp đo kết quả".
 - CSV: chọn dòng bằng checkbox, áp dụng/làm mới/xuất báo cáo (Excel/PDF).
 - Ghi CSV → Sheet KPI (báo lỗi rõ ràng).
-- Sidebar: "🔧 Chuẩn bị thư mục báo cáo" tạo /<USE>/Báo cáo KPI dưới App_KPI (ID có thể nhập URL/ID).
-- Lưu dữ liệu: xuất Excel+PDF, đặt tên KPI_dd-mm-yy, đẩy vào đúng thư mục trên Drive.
+- Sidebar: "🔧 Chuẩn bị thư mục báo cáo" tạo /<USE>/Báo cáo KPI dưới App_KPI (ID có thể dán URL/ID).
+- Lưu dữ liệu: xuất Excel+PDF, đặt tên KPI_dd-mm-yy, đẩy vào đúng thư mục Drive.
 - KHÔNG có bất kỳ Path.write_text trong file.
 """
 
@@ -19,7 +17,6 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-import matplotlib.pyplot as plt
 
 # ========== Drive API ==========
 try:
@@ -46,7 +43,7 @@ if "kpi_sheet_name" not in st.session_state:
 if "drive_root_id" not in st.session_state:
     st.session_state["drive_root_id"] = APP_KPI_DRIVE_ROOT_ID_DEFAULT
 if "_report_folder_id" not in st.session_state:
-    st.session_state["_report_folder_id"] = ""
+    st.session_state["_report_folder_id"] = ""  # id thư mục "Báo cáo KPI" đã chuẩn bị
 
 # ================= TIỆN ÍCH =================
 def toast(msg, icon="ℹ️"):
@@ -271,7 +268,7 @@ def ensure_parent_ok(service, parent_id: str):
         ) from e
 
 def ensure_folder(service, parent_id: str, name: str) -> str:
-    """Tìm hoặc tạo folder con dưới parent_id (hỗ trợ Shared Drives)."""
+    """Tìm hoặc tạo folder con dưới parent_id (supportsAllDrives)."""
     ensure_parent_ok(service, parent_id)
     q = (
         "mimeType='application/vnd.google-apps.folder' "
@@ -567,6 +564,33 @@ if st.session_state.get("confirm_refresh", False):
             st.session_state["confirm_refresh"] = False
             toast("Đã hủy làm mới.", "ℹ️")
 
+def generate_pdf_from_df(df: pd.DataFrame, title: str = "BÁO CÁO KPI") -> bytes:
+    try:
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib import colors
+        from reportlab.lib.units import cm
+        from reportlab.lib.styles import getSampleStyleSheet
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
+        styles = getSampleStyleSheet()
+        story = [Paragraph(title, styles["Title"]), Spacer(1, 0.3*cm)]
+        cols = list(df.columns)
+        data = [cols] + df.fillna("").astype(str).values.tolist()
+        t = Table(data, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+            ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("ALIGN", (0,0), (-1,-1), "CENTER"),
+        ]))
+        story.append(t)
+        doc.build(story)
+        return buf.getvalue()
+    except Exception:
+        st.warning("Thiếu gói 'reportlab' để xuất PDF.")
+        return b""
+
 if export_clicked:
     # Excel
     buf_xlsx = io.BytesIO()
@@ -577,12 +601,9 @@ if export_clicked:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     # PDF
-    try:
-        pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], title="BÁO CÁO KPI")
-        if pdf_bytes:
-            st.download_button("⬇️ Tải PDF báo cáo", data=pdf_bytes, file_name="KPI_baocao.pdf", mime="application/pdf")
-    except Exception:
-        st.warning("Thiếu 'reportlab' để xuất PDF.")
+    pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], title="BÁO CÁO KPI")
+    if pdf_bytes:
+        st.download_button("⬇️ Tải PDF báo cáo", data=pdf_bytes, file_name="KPI_baocao.pdf", mime="application/pdf")
 
 if save_drive_clicked:
     try:
@@ -619,7 +640,3 @@ if save_drive_clicked:
         toast(f"Đã lưu: /{use_code}/Báo cáo KPI/{fname_xlsx} & {fname_pdf}", "✅")
     except Exception as e:
         st.error(f"Lỗi lưu Google Drive: {e}")
-'''
-
-Path("/mnt/data/app.py").write_text(app_code, encoding="utf-8")
-print("Updated app.py written. Size (KB):", round(Path('/mnt/data/app.py').stat().st_size/1024, 1))
