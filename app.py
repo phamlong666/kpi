@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.5.2)
-- Fix triệt để: tích chọn được bình thường, không “load đi load lại”.
-- Chỉ reset chọn sau prefill/apply; không reset ở render thường.
-- Cột “✓ Chọn” ép kiểu bool + CheckboxColumn.
-- Giữ toàn bộ chức năng và các sửa trước đó (form ở TRÊN, định dạng số VN, tính KPI sai số ≤ ±1,5%: mỗi 0,1% vượt trừ 0,02 (max 3), ghi Sheets, lưu Drive).
+KPI App – Định Hóa (v3.6)
+- Sửa triệt để: tick chọn dòng trong bảng CSV hoạt động ổn định.
+  + Lưu _selected_idx trong session_state.
+  + Khi render, gán lại cột "✓ Chọn" theo _selected_idx (không bị reset).
+  + Chỉ rerun một lần khi thay đổi chọn.
+- Form ở TRÊN; bảng CSV ở DƯỚI.
+- Định dạng số VN 1.000.000,00; tính KPI sai số ≤ ±1,5% (mỗi 0,1% vượt trừ 0,02, tối đa 3 điểm).
+- Ghi lên Google Sheets; Lưu báo cáo Excel/PDF lên Google Drive (khuyên dùng Shared Drive).
 """
 
 import re, io
@@ -30,18 +33,18 @@ GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"
 KPI_SHEET_DEFAULT       = "KPI"
 APP_KPI_DRIVE_ROOT_ID_DEFAULT = "1rE3E8CuPViw8-VYWYZgeB4Mz9WEY3e7"
 
+# -------- session defaults --------
 defaults = {
     "spreadsheet_id": GOOGLE_SHEET_ID_DEFAULT,
     "kpi_sheet_name":  KPI_SHEET_DEFAULT,
     "drive_root_id":   APP_KPI_DRIVE_ROOT_ID_DEFAULT,
     "_report_folder_id": "",
-    "editor_version": 0,          # chỉ tăng khi cần reset widget
-    "_pending_clear": False,      # cờ chỉ bật NGAY TRƯỚC rerun nhằm reset lựa chọn ở lần render kế tiếp
+    "_selected_idx": None,   # <— lưu dòng đang chọn trong bảng
 }
 for k, v in defaults.items():
     if k not in st.session_state: st.session_state[k] = v
 
-# ---------- utils ----------
+# -------- utils --------
 def toast(msg, icon="ℹ️"):
     try: st.toast(msg, icon=icon)
     except Exception: pass
@@ -158,6 +161,7 @@ def compute_score_with_method(row):
     weight = parse_float(row.get("Trọng số")) or 0.0
     method = str(row.get("Phương pháp đo kết quả") or "").strip().lower()
 
+    # KPI sai số: ≤ ±1,5%; mỗi 0,1% vượt trừ 0,02 (tối đa 3 điểm)
     if ("sai số" in method or "sai so" in method) and ("0,02" in method or "0.02" in method):
         unit = str(row.get("Đơn vị tính") or "").lower()
         actual_err_pct = None
@@ -337,7 +341,7 @@ def write_kpi_to_sheet(sh, sheet_name:str, df:pd.DataFrame)->bool:
     except Exception as e:
         st.error(f"Lưu KPI thất bại: {e}"); return False
 
-# --- PREFILL (nếu có) ---
+# --- form data holder ---
 if "_csv_form" not in st.session_state:
     st.session_state["_csv_form"] = {
         "Tên chỉ tiêu (KPI)":"", "Đơn vị tính":"", "Kế hoạch":0.0, "Thực hiện":0.0, "Trọng số":100.0,
@@ -345,10 +349,15 @@ if "_csv_form" not in st.session_state:
         "Phương pháp đo kết quả":"Tăng tốt hơn", "Ngưỡng dưới":"", "Ngưỡng trên":"", "Ghi chú":"", "Tên đơn vị":""
     }
 
+# nhận prefill nếu có
 if st.session_state.get("_prefill_from_row"):
     row = st.session_state.pop("_prefill_from_row")
     for k, v in row.items():
         if k in KPI_COLS: st.session_state["_csv_form"][k] = v
+    if "plan_txt" not in st.session_state:
+        st.session_state["plan_txt"] = ""
+    if "actual_txt" not in st.session_state:
+        st.session_state["actual_txt"] = ""
     st.session_state["plan_txt"]   = format_vn_number(parse_float(row.get("Kế hoạch")  or 0), 2)
     st.session_state["actual_txt"] = format_vn_number(parse_float(row.get("Thực hiện") or 0), 2)
 
@@ -424,40 +433,40 @@ if up is not None:
     if "Điểm KPI" not in tmp.columns: tmp["Điểm KPI"] = tmp.apply(compute_score_with_method, axis=1)
     st.session_state["_csv_cache"] = tmp
 
-df_show = st.session_state["_csv_cache"].copy()
-# tạo/ép kiểu cột chọn
-if "✓ Chọn" not in df_show.columns: df_show.insert(0,"✓ Chọn", False)
+# tạo dataframe hiển thị với cột ✓ theo _selected_idx (để không bị reset)
+base = st.session_state["_csv_cache"]
+df_show = base.copy()
+if "✓ Chọn" not in df_show.columns:
+    df_show.insert(0, "✓ Chọn", False)
 df_show["✓ Chọn"] = df_show["✓ Chọn"].astype("bool")
+sel = st.session_state.get("_selected_idx", None)
+if sel is not None and sel in df_show.index:
+    df_show.loc[sel, "✓ Chọn"] = True
 
-# reset chọn CHỈ khi có cờ _pending_clear (được bật ngay trước rerun sau prefill/apply)
-if st.session_state.get("_pending_clear"):
-    df_show["✓ Chọn"] = False
-    st.session_state["_pending_clear"] = False  # tắt ngay để lần render sau không reset nữa
-
-editor_key = f"csv_editor_v{st.session_state['editor_version']}"
 df_edit = st.data_editor(
     df_show,
     use_container_width=True,
     hide_index=True,
     num_rows="dynamic",
-    key=editor_key,
     column_config={
         "✓ Chọn": st.column_config.CheckboxColumn(label="✓ Chọn", default=False, help="Chọn 1 dòng để nạp lên biểu mẫu")
-    }
+    },
+    key="csv_editor"
 )
-# cập nhật cache (không lưu cột ✓ Chọn)
+
+# lưu cache (không gồm cột ✓)
 st.session_state["_csv_cache"] = df_edit.drop(columns=["✓ Chọn"], errors="ignore")
 
-selected_rows = df_edit[df_edit["✓ Chọn"]==True]
-if not selected_rows.empty:
-    row = selected_rows.iloc[0].drop(labels=["✓ Chọn"], errors="ignore").to_dict()
-    st.session_state["_selected_idx"]     = int(selected_rows.index[0])
-    st.session_state["_prefill_from_row"] = row
-    # báo cho lần render kế tiếp xóa chọn và reset state của editor
-    st.session_state["_pending_clear"] = True
-    st.session_state["editor_version"] += 1
+# phát hiện thay đổi chọn
+new_selected_idxs = df_edit.index[df_edit["✓ Chọn"]==True].tolist()
+new_sel = new_selected_idxs[0] if new_selected_idxs else None
+if new_sel != st.session_state.get("_selected_idx"):
+    st.session_state["_selected_idx"] = new_sel
+    if new_sel is not None:
+        st.session_state["_prefill_from_row"] = st.session_state["_csv_cache"].loc[new_sel].to_dict()
     st.rerun()
 
+# ----- apply form vào cache -----
 def apply_form_to_cache():
     base = st.session_state["_csv_cache"].copy()
     new_row = {c: st.session_state["_csv_form"].get(c, "") for c in KPI_COLS}
@@ -475,15 +484,11 @@ def apply_form_to_cache():
     st.session_state["_csv_cache"] = base
     st.session_state["plan_txt"]   = format_vn_number(new_row.get("Kế hoạch") or 0, 2)
     st.session_state["actual_txt"] = format_vn_number(new_row.get("Thực hiện") or 0, 2)
-    # sau khi áp dụng → reset lựa chọn ở lần render kế tiếp
-    st.session_state["_selected_idx"]  = None
-    st.session_state["_pending_clear"] = True
-    st.session_state["editor_version"] += 1
 
-# ===== NÚT =====
 if apply_clicked:
     apply_form_to_cache(); toast("Đã áp dụng dữ liệu biểu mẫu vào CSV tạm.","✅"); st.rerun()
 
+# ----- xuất báo cáo / ghi sheet / làm mới -----
 def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI")->bytes:
     try:
         from reportlab.lib.pagesizes import A4, landscape
@@ -519,10 +524,9 @@ if st.session_state.get("confirm_refresh", False):
         c = st.columns(2)
         if c[0].button("Có, làm mới ngay", type="primary"):
             st.session_state["_csv_cache"] = pd.DataFrame(columns=KPI_COLS)
-            st.session_state["_selected_idx"]  = None
-            st.session_state["_pending_clear"] = True
-            st.session_state["editor_version"] += 1
-            st.session_state["confirm_refresh"] = False; toast("Đã làm mới bảng CSV tạm.","✅"); st.rerun()
+            st.session_state["_selected_idx"] = None
+            st.session_state["confirm_refresh"] = False
+            toast("Đã làm mới bảng CSV tạm.","✅"); st.rerun()
         if c[1].button("Không, giữ nguyên dữ liệu"):
             st.session_state["confirm_refresh"] = False; toast("Đã hủy làm mới.","ℹ️")
 
