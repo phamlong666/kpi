@@ -1,17 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.4.2)
-- Sửa lỗi StreamlitAPIException khi set session_state sau khi widget tạo.
-  Cách làm: khi chọn dòng ở bảng, chỉ set cờ _needs_prefill rồi st.rerun();
-  lần render sau FORM sẽ prefill trước khi tạo widget.
-- Ô Kế hoạch & Thực hiện: luôn hiển thị dạng 1.000.000,00; đồng bộ 2 chiều.
-- Nhánh KPI "Sai số ≤ ±1,5%, mỗi 0,1% vượt trừ 0,02 (tối đa 3)": 
-  + Nếu người dùng nhập 'Thực hiện' là % (ví dụ 1.2 hoặc 0.012) → hiểu là phần trăm sai số.
-  + Nếu người dùng nhập 'Thực hiện' là sản lượng (ví dụ 12.000.000) và có 'Kế hoạch' → 
-    tự tính % sai số = |Thực hiện - Kế hoạch|/Kế hoạch * 100.
-  + Điểm KPI = 10 - điểm trừ; điểm trừ tối đa 3; sau đó nhân trọng số.
-- CSV: chọn dòng bằng checkbox; Áp dụng/Làm mới/Xuất/Lưu Drive.
-- Drive: ưu tiên Shared Drive; nếu My Drive quota 403 → UPDATE file có sẵn.
+KPI App – Định Hóa (v3.5)
+- Biểu mẫu nhập tay đặt TRÊN; bảng CSV ở DƯỚI.
+- Text số kiểu VN (1.000.000,00) + parse trực tiếp khi người dùng đang gõ.
+- Chọn dòng → form prefill an toàn (không lỗi session_state).
+- Áp dụng/Ghi: cập nhật đúng dòng đang chọn trong CSV tạm.
+- KPI sai số ≤ ±1,5%: cứ vượt 0,1% trừ 0,02 (tối đa 3) rồi nhân trọng số.
+- Sheets/Drive giữ nguyên chức năng (Shared Drive khuyến nghị).
 """
 
 import re, io
@@ -21,7 +16,7 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ===== Drive API =====
+# ===== Drive API (tùy chọn) =====
 try:
     from googleapiclient.discovery import build as gbuild
     from googleapiclient.http import MediaIoBaseUpload
@@ -39,12 +34,15 @@ GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"
 KPI_SHEET_DEFAULT = "KPI"
 APP_KPI_DRIVE_ROOT_ID_DEFAULT = "1rE3E8CuPViw8-VYWYZgeB4Mz9WEY3e7"
 
-if "spreadsheet_id" not in st.session_state: st.session_state["spreadsheet_id"] = GOOGLE_SHEET_ID_DEFAULT
-if "kpi_sheet_name"  not in st.session_state: st.session_state["kpi_sheet_name"]  = KPI_SHEET_DEFAULT
-if "drive_root_id"   not in st.session_state: st.session_state["drive_root_id"]   = APP_KPI_DRIVE_ROOT_ID_DEFAULT
-if "_report_folder_id" not in st.session_state: st.session_state["_report_folder_id"] = ""
+for k, v in {
+    "spreadsheet_id": GOOGLE_SHEET_ID_DEFAULT,
+    "kpi_sheet_name":  KPI_SHEET_DEFAULT,
+    "drive_root_id":   APP_KPI_DRIVE_ROOT_ID_DEFAULT,
+    "_report_folder_id": ""
+}.items():
+    if k not in st.session_state: st.session_state[k] = v
 
-# ===== TIỆN ÍCH CHUNG =====
+# ===== TIỆN ÍCH =====
 def toast(msg, icon="ℹ️"):
     try: st.toast(msg, icon=icon)
     except Exception: pass
@@ -86,19 +84,22 @@ def df_from_ws(ws) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 ALIAS = {
-    "USE (mã đăng nhập)":[ "USE (mã đăng nhập)", r"Tài khoản (USE\\username)", "Tài khoản (USE/username)","Tài khoản","Username","USE","User"],
-    "Mật khẩu mặc định":["Mật khẩu mặc định","Password mặc định","Password","Mật khẩu"],
-    "Tên chỉ tiêu (KPI)":["Tên chỉ tiêu (KPI)","Tên KPI","Chỉ tiêu"],
-    "Đơn vị tính":["Đơn vị tính","Unit"],
-    "Kế hoạch":["Kế hoạch","Plan","Target","Kế hoạch (tháng)"],
-    "Thực hiện":["Thực hiện","Thực hiện (tháng)","Actual (month)"],
-    "Trọng số":["Trọng số","Weight"],
-    "Bộ phận/người phụ trách":["Bộ phận/người phụ trách","Phụ trách"],
-    "Tháng":["Tháng","Month"], "Năm":["Năm","Year"],
-    "Điểm KPI":["Điểm KPI","Score"], "Ghi chú":["Ghi chú","Notes"],
-    "Tên đơn vị":["Tên đơn vị","Đơn vị"],
-    "Phương pháp đo kết quả":["Phương pháp đo kết quả","Cách tính","Công thức"],
-    "Ngưỡng dưới":["Ngưỡng dưới","Min"], "Ngưỡng trên":["Ngưỡng trên","Max"],
+    "USE (mã đăng nhập)": ["USE (mã đăng nhập)", r"Tài khoản (USE\\username)", "Tài khoản (USE/username)", "Tài khoản", "Username", "USE", "User"],
+    "Mật khẩu mặc định": ["Mật khẩu mặc định", "Password mặc định", "Password", "Mật khẩu"],
+    "Tên chỉ tiêu (KPI)": ["Tên chỉ tiêu (KPI)", "Tên KPI", "Chỉ tiêu"],
+    "Đơn vị tính": ["Đơn vị tính", "Unit"],
+    "Kế hoạch": ["Kế hoạch", "Plan", "Target", "Kế hoạch (tháng)"],
+    "Thực hiện": ["Thực hiện", "Thực hiện (tháng)", "Actual (month)"],
+    "Trọng số": ["Trọng số", "Weight"],
+    "Bộ phận/người phụ trách": ["Bộ phận/người phụ trách", "Phụ trách"],
+    "Tháng": ["Tháng", "Month"],
+    "Năm": ["Năm", "Year"],
+    "Điểm KPI": ["Điểm KPI", "Score"],
+    "Ghi chú": ["Ghi chú", "Notes"],
+    "Tên đơn vị": ["Tên đơn vị", "Đơn vị"],
+    "Phương pháp đo kết quả": ["Phương pháp đo kết quả", "Cách tính", "Công thức"],
+    "Ngưỡng dưới": ["Ngưỡng dưới", "Min"],
+    "Ngưỡng trên": ["Ngưỡng trên", "Max"],
 }
 def normalize_columns(df: pd.DataFrame)->pd.DataFrame:
     if df is None or df.empty: return df
@@ -114,7 +115,7 @@ def normalize_columns(df: pd.DataFrame)->pd.DataFrame:
     if "Kế hoạch (tháng)"  in df.columns and "Kế hoạch"  not in df.columns: df = df.rename(columns={"Kế hoạch (tháng)":"Kế hoạch"})
     return df
 
-# ---- Định dạng & parse số kiểu Việt Nam ----
+# ---- số VN ----
 def format_vn_number(x, decimals=2):
     try: f = float(x)
     except: return ""
@@ -133,14 +134,13 @@ def parse_float(x):
     if isinstance(x,(int,float)): return float(x)
     return parse_vn_number(x)
 
-# ---- Penalty KPI sai số ----
+# ---- KPI sai số ----
 def to_percent(val):
     v = parse_float(val)
     if v is None: return None
     return v*100.0 if abs(v) <= 1.0 else v
 
 def kpi_penalty_error_method(actual_err_pct, threshold_pct=1.5, step_pct=0.1, per_step_penalty=0.02, max_penalty=3.0):
-    """Trả về (penalty, base10 = 10 - penalty)."""
     if actual_err_pct is None: return 0.0, None
     exceed  = max(0.0, actual_err_pct - threshold_pct)
     steps   = int(exceed // step_pct)
@@ -150,56 +150,54 @@ def kpi_penalty_error_method(actual_err_pct, threshold_pct=1.5, step_pct=0.1, pe
 def compute_score_generic(plan, actual, weight):
     if plan in (None,0) or actual is None: return None
     ratio = max(min(actual/plan, 2.0), 0.0)
-    w = weight/100.0 if weight and weight > 1 else (weight or 0.0)
+    w = weight/100.0 if (weight and weight > 1) else (weight or 0.0)
     return round(ratio*10*w, 2)
 
 def compute_score_with_method(row):
-    plan   = parse_float(row.get("Kế hoạch"))
-    actual = parse_float(row.get("Thực hiện"))
+    # lấy trực tiếp giá trị hiện tại nếu có (hỗ trợ đang gõ)
+    plan   = parse_vn_number(st.session_state.get("plan_txt",""))   if "plan_txt"   in st.session_state else None
+    actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
+    if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
+    if actual is None: actual = parse_float(row.get("Thực hiện"))
     weight = parse_float(row.get("Trọng số")) or 0.0
     method = str(row.get("Phương pháp đo kết quả") or "").strip().lower()
 
-    # KPI sai số: ≤ ±1,5%, vượt 0,1% trừ 0,02 (tối đa 3)
+    # KPI sai số: ≤ ±1,5%, 0,1% vượt trừ 0,02 (max 3)
     if ("sai số" in method or "sai so" in method) and ("0,02" in method or "0.02" in method):
-        # Ưu tiên hiểu 'Thực hiện' là % nếu giá trị nhỏ (<=5) hoặc <=100 mà đơn vị chứa '%'
         unit = str(row.get("Đơn vị tính") or "").lower()
         actual_err_pct = None
         if actual is not None:
             if actual <= 5 or ("%" in unit and actual <= 100):
-                actual_err_pct = to_percent(actual)  # 1.5 hoặc 0.015 -> 1.5%
+                actual_err_pct = to_percent(actual)
             elif plan not in (None, 0):
-                # Người dùng nhập sản lượng → tự tính sai số %
-                actual_err_pct = abs(actual - plan) / abs(plan) * 100.0
-
-        # Ngưỡng cho phép (mặc định 1.5). Cố gắng đọc từ chuỗi, nếu không có thì dùng 'Ngưỡng trên'
+                actual_err_pct = abs(actual - plan)/abs(plan)*100.0
         threshold = 1.5
         m = re.search(r"(\d+)[\.,](\d+)", method)
         if m:
-            try: threshold = float(m.group(1) + "." + m.group(2))
+            try: threshold = float(m.group(1)+"."+m.group(2))
             except: threshold = 1.5
         else:
             thr = parse_float(row.get("Ngưỡng trên"))
             if thr is not None: threshold = thr
-
         penalty, base10 = kpi_penalty_error_method(actual_err_pct, threshold, 0.1, 0.02, 3.0)
-        w = weight/100.0 if weight and weight > 1 else (weight or 0.0)
+        w = weight/100.0 if (weight and weight > 1) else (weight or 0.0)
         return None if base10 is None else round(base10*w, 2)
 
-    # Các phương pháp chung khác
     if not method: return compute_score_generic(plan, actual, weight)
     if plan in (None,0) or actual is None: return None
-    w = weight/100.0 if weight and weight > 1 else (weight or 0.0)
+    w = weight/100.0 if (weight and weight > 1) else (weight or 0.0)
 
     if any(k in method for k in ["tăng",">=","cao hơn tốt","increase","higher"]):
-        ratio = max(min(actual/plan,2.0),0.0); return round(ratio*10*w,2)
+        return round(max(min(actual/plan,2.0),0.0)*10*w,2)
     if any(k in method for k in ["giảm","<=","thấp hơn tốt","decrease","lower"]):
-        ratio = 1.0 if actual<=plan else max(min(plan/actual,2.0),0.0); return round(ratio*10*w,2)
+        ratio = 1.0 if actual<=plan else max(min(plan/actual,2.0),0.0)
+        return round(ratio*10*w,2)
     if any(k in method for k in ["đạt","dat","bool","pass/fail"]):
-        ok = actual>=plan; return round((10.0 if ok else 0.0)*w,2)
+        return round((10.0 if actual>=plan else 0.0)*w,2)
     if any(k in method for k in ["khoảng","range","trong khoảng"]):
         lo = parse_float(row.get("Ngưỡng dưới")); hi = parse_float(row.get("Ngưỡng trên"))
         if lo is None or hi is None: return compute_score_generic(plan, actual, weight)
-        ok = lo <= actual <= hi; return round((10.0 if ok else 0.0)*w,2)
+        return round((10.0 if (lo<=actual<=hi) else 0.0)*w,2)
     return compute_score_generic(plan, actual, weight)
 
 # ===== LOGIN =====
@@ -232,7 +230,7 @@ def check_credentials(use_name:str, password:str)->bool:
     row = df.loc[df[col_use].astype(str).str.strip().str.lower()==u]
     return (not row.empty) and (str(row.iloc[0][col_pw]).strip()==p)
 
-# ===== Drive helpers =====
+# ===== Drive helpers (như cũ) =====
 def get_drive_service():
     if gbuild is None:
         st.warning("Thiếu gói 'google-api-python-client' để làm việc với Google Drive."); return None
@@ -344,10 +342,86 @@ def write_kpi_to_sheet(sh, sheet_name:str, df:pd.DataFrame)->bool:
     except Exception as e:
         st.error(f"Lưu KPI thất bại: {e}"); return False
 
-# ===== UI: NHẬP CSV + FORM TRÊN =====
-st.subheader("⬆️ Nhập CSV vào KPI")
+# --------- PREFILL (từ bảng chọn) ---------
+if "_csv_form" not in st.session_state:
+    st.session_state["_csv_form"] = {
+        "Tên chỉ tiêu (KPI)":"", "Đơn vị tính":"", "Kế hoạch":0.0, "Thực hiện":0.0, "Trọng số":100.0,
+        "Bộ phận/người phụ trách":"", "Tháng":str(datetime.now().month), "Năm":str(datetime.now().year),
+        "Phương pháp đo kết quả":"Tăng tốt hơn", "Ngưỡng dưới":"", "Ngưỡng trên":"", "Ghi chú":"", "Tên đơn vị":""
+    }
 
-# --- CSV uploader & editor (đặt trước logic chọn dòng → prefilling) ---
+# nếu có dữ liệu cần prefill (do click chọn dòng), set vào trước khi vẽ widget
+if st.session_state.get("_prefill_from_row"):
+    row = st.session_state.pop("_prefill_from_row")
+    for k, v in row.items():
+        if k in KPI_COLS: st.session_state["_csv_form"][k] = v
+    st.session_state["plan_txt"]   = format_vn_number(parse_float(row.get("Kế hoạch")  or 0), 2)
+    st.session_state["actual_txt"] = format_vn_number(parse_float(row.get("Thực hiện") or 0), 2)
+
+# đảm bảo hai textbox có giá trị mặc định
+if "plan_txt"   not in st.session_state: st.session_state["plan_txt"]   = format_vn_number(st.session_state["_csv_form"].get("Kế hoạch") or 0.0, 2)
+if "actual_txt" not in st.session_state: st.session_state["actual_txt"] = format_vn_number(st.session_state["_csv_form"].get("Thực hiện") or 0.0, 2)
+
+# ====== FORM (TRÊN) ======
+st.subheader("✍️ Biểu mẫu nhập tay")
+f = st.session_state["_csv_form"]
+
+def _on_change_plan():
+    val = parse_vn_number(st.session_state["plan_txt"])
+    if val is not None:
+        st.session_state["_csv_form"]["Kế hoạch"] = val
+        st.session_state["plan_txt"] = format_vn_number(val, 2)
+
+def _on_change_actual():
+    val = parse_vn_number(st.session_state["actual_txt"])
+    if val is not None:
+        st.session_state["_csv_form"]["Thực hiện"] = val
+        st.session_state["actual_txt"] = format_vn_number(val, 2)
+
+c0 = st.columns([2,1,1,1])
+with c0[0]: f["Tên chỉ tiêu (KPI)"] = st.text_input("Tên chỉ tiêu (KPI)", value=f["Tên chỉ tiêu (KPI)"])
+with c0[1]: f["Đơn vị tính"] = st.text_input("Đơn vị tính", value=f["Đơn vị tính"])
+with c0[2]: f["Bộ phận/người phụ trách"] = st.text_input("Bộ phận/người phụ trách", value=f["Bộ phận/người phụ trách"])
+with c0[3]: f["Tên đơn vị"] = st.text_input("Tên đơn vị", value=f["Tên đơn vị"])
+
+c1 = st.columns(3)
+with c1[0]: st.text_input("Kế hoạch",  key="plan_txt",  on_change=_on_change_plan)
+with c1[1]: st.text_input("Thực hiện", key="actual_txt", on_change=_on_change_actual)
+with c1[2]: f["Trọng số"] = st.number_input("Trọng số (%)", value=float(f.get("Trọng số") or 0.0))
+
+c2 = st.columns(3)
+with c2[0]:
+    options_methods = ["Tăng tốt hơn","Giảm tốt hơn","Đạt/Không đạt","Trong khoảng",
+                       "Sai số ≤ ±1,5%: mỗi 0,1% vượt trừ 0,02 (max 3)"]
+    cur = f.get("Phương pháp đo kết quả","Tăng tốt hơn")
+    f["Phương pháp đo kết quả"] = st.selectbox("Phương pháp đo kết quả", options=options_methods,
+                                               index=options_methods.index(cur) if cur in options_methods else 0)
+with c2[1]:
+    # tính điểm theo giá trị đang gõ
+    _row_tmp = {k:f.get(k) for k in f.keys()}
+    _row_tmp["Điểm KPI"] = compute_score_with_method(_row_tmp)
+    st.metric("Điểm KPI (tự tính)", _row_tmp["Điểm KPI"] if _row_tmp["Điểm KPI"] is not None else "—")
+with c2[2]: f["Ghi chú"] = st.text_input("Ghi chú", value=f["Ghi chú"])
+
+if f["Phương pháp đo kết quả"] == "Trong khoảng":
+    c3 = st.columns(2)
+    with c3[0]: f["Ngưỡng dưới"] = st.text_input("Ngưỡng dưới", value=str(f.get("Ngưỡng dưới") or ""))
+    with c3[1]: f["Ngưỡng trên"] = st.text_input("Ngưỡng trên", value=str(f.get("Ngưỡng trên") or ""))
+
+c4 = st.columns(2)
+with c4[0]: f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
+with c4[1]: f["Năm"]   = st.text_input("Năm",   value=str(f["Năm"]))
+
+btns = st.columns([1,1,1,1,2])
+apply_clicked      = btns[0].button("Áp dụng vào bảng CSV tạm", type="primary", use_container_width=True)
+save_csv_clicked   = btns[1].button("💾 Ghi CSV tạm vào sheet KPI", use_container_width=True)
+refresh_clicked    = btns[2].button("🔁 Làm mới bảng CSV", use_container_width=True)
+export_clicked     = btns[3].button("📤 Xuất báo cáo (Excel/PDF)", use_container_width=True)
+save_drive_clicked = btns[4].button("☁️ Lưu dữ liệu vào Google Drive", use_container_width=True)
+
+# ====== CSV (DƯỚI) ======
+st.subheader("⬇️ Nhập CSV vào KPI")
+
 up = st.file_uploader("Tải file CSV", type=["csv"])
 if "_csv_cache" not in st.session_state:
     st.session_state["_csv_cache"] = pd.DataFrame(columns=KPI_COLS)
@@ -362,116 +436,38 @@ if up is not None:
 
 df_show = st.session_state["_csv_cache"].copy()
 if "✓ Chọn" not in df_show.columns: df_show.insert(0,"✓ Chọn",False)
-st.write("Tích chọn một dòng để nạp dữ liệu lên biểu mẫu phía trên:")
+st.write("Tích chọn một dòng để nạp dữ liệu lên biểu mẫu:")
 df_edit = st.data_editor(df_show, use_container_width=True, hide_index=True, num_rows="dynamic", key="csv_editor")
 st.session_state["_csv_cache"] = df_edit.drop(columns=["✓ Chọn"], errors="ignore")
 
-# Nếu chọn dòng: cập nhật _csv_form và đặt cờ prefill rồi rerun
 selected_rows = df_edit[df_edit["✓ Chọn"]==True]
 if not selected_rows.empty:
     row = selected_rows.iloc[0].drop(labels=["✓ Chọn"], errors="ignore").to_dict()
-    if "_csv_form" not in st.session_state:
-        st.session_state["_csv_form"] = {}
-    for k in [c for c in KPI_COLS if c in row]:
-        st.session_state["_csv_form"][k] = row.get(k, st.session_state["_csv_form"].get(k))
-    st.session_state["_needs_prefill"] = True
+    st.session_state["_selected_idx"]   = int(selected_rows.index[0])
+    st.session_state["_prefill_from_row"] = row
     st.rerun()
 
-with st.container(border=True):
-    st.markdown("#### ✍️ Biểu mẫu nhập tay")
-
-    if "_csv_form" not in st.session_state:
-        st.session_state["_csv_form"] = {
-            "Tên chỉ tiêu (KPI)":"", "Đơn vị tính":"", "Kế hoạch":0.0, "Thực hiện":0.0, "Trọng số":0.0,
-            "Bộ phận/người phụ trách":"", "Tháng":str(datetime.now().month), "Năm":str(datetime.now().year),
-            "Phương pháp đo kết quả":"Tăng tốt hơn", "Ngưỡng dưới":"", "Ngưỡng trên":"", "Ghi chú":"", "Tên đơn vị":""
-        }
-    f = st.session_state["_csv_form"]
-
-    # chuẩn state cho text_input định dạng VN (prefill TRƯỚC khi tạo widget)
-    if "plan_txt" not in st.session_state:   st.session_state["plan_txt"]   = format_vn_number(f.get("Kế hoạch") or 0.0, 2)
-    if "actual_txt" not in st.session_state: st.session_state["actual_txt"] = format_vn_number(f.get("Thực hiện") or 0.0, 2)
-    if st.session_state.get("_needs_prefill"):
-        st.session_state["plan_txt"]   = format_vn_number(parse_float(f.get("Kế hoạch")  or 0), 2)
-        st.session_state["actual_txt"] = format_vn_number(parse_float(f.get("Thực hiện") or 0), 2)
-        st.session_state["_needs_prefill"] = False
-
-    def _on_change_plan():
-        val = parse_vn_number(st.session_state["plan_txt"])
-        if val is not None:
-            st.session_state["_csv_form"]["Kế hoạch"] = val
-            st.session_state["plan_txt"] = format_vn_number(val, 2)
-
-    def _on_change_actual():
-        val = parse_vn_number(st.session_state["actual_txt"])
-        if val is not None:
-            st.session_state["_csv_form"]["Thực hiện"] = val
-            st.session_state["actual_txt"] = format_vn_number(val, 2)
-
-    # H1
-    c0 = st.columns([2,1,1,1])
-    with c0[0]: f["Tên chỉ tiêu (KPI)"] = st.text_input("Tên chỉ tiêu (KPI)", value=f["Tên chỉ tiêu (KPI)"])
-    with c0[1]: f["Đơn vị tính"] = st.text_input("Đơn vị tính", value=f["Đơn vị tính"])
-    with c0[2]: f["Bộ phận/người phụ trách"] = st.text_input("Bộ phận/người phụ trách", value=f["Bộ phận/người phụ trách"])
-    with c0[3]: f["Tên đơn vị"] = st.text_input("Tên đơn vị", value=f["Tên đơn vị"])
-
-    # H2 (Kế hoạch/Thực hiện: text VN + on_change)
-    c1 = st.columns(3)
-    with c1[0]: st.text_input("Kế hoạch", key="plan_txt",  on_change=_on_change_plan)
-    with c1[1]: st.text_input("Thực hiện", key="actual_txt", on_change=_on_change_actual)
-    with c1[2]: f["Trọng số"] = st.number_input("Trọng số (%)", value=float(f.get("Trọng số") or 0.0))
-
-    # H3
-    c2 = st.columns(3)
-    with c2[0]:
-        options_methods = ["Tăng tốt hơn","Giảm tốt hơn","Đạt/Không đạt","Trong khoảng",
-                           "Sai số ≤ ±1,5%: mỗi 0,1% vượt trừ 0,02 (max 3)"]
-        current_method = f.get("Phương pháp đo kết quả","Tăng tốt hơn")
-        f["Phương pháp đo kết quả"] = st.selectbox("Phương pháp đo kết quả", options=options_methods,
-                                                   index=options_methods.index(current_method) if current_method in options_methods else 0)
-    with c2[1]:
-        _row_tmp = {k:f.get(k) for k in f.keys()}
-        _row_tmp["Điểm KPI"] = compute_score_with_method(_row_tmp)
-        st.metric("Điểm KPI (tự tính)", _row_tmp["Điểm KPI"] if _row_tmp["Điểm KPI"] is not None else "—")
-    with c2[2]: f["Ghi chú"] = st.text_input("Ghi chú", value=f["Ghi chú"])
-
-    if f["Phương pháp đo kết quả"] == "Trong khoảng":
-        c3 = st.columns(2)
-        with c3[0]: f["Ngưỡng dưới"] = st.text_input("Ngưỡng dưới", value=str(f.get("Ngưỡng dưới") or ""))
-        with c3[1]: f["Ngưỡng trên"] = st.text_input("Ngưỡng trên", value=str(f.get("Ngưỡng trên") or ""))
-
-    # H4
-    c4 = st.columns(2)
-    with c4[0]: f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
-    with c4[1]: f["Năm"]   = st.text_input("Năm",   value=str(f["Năm"]))
-
-    col_btn = st.columns([1,1,1,1,2])
-    apply_clicked      = col_btn[0].button("Áp dụng vào bảng CSV tạm", type="primary", use_container_width=True)
-    save_csv_clicked   = col_btn[1].button("💾 Ghi CSV tạm vào sheet KPI", use_container_width=True)
-    refresh_clicked    = col_btn[2].button("🔁 Làm mới bảng CSV", use_container_width=True)
-    export_clicked     = col_btn[3].button("📤 Xuất báo cáo (Excel/PDF)", use_container_width=True)
-    save_drive_clicked = col_btn[4].button("☁️ Lưu dữ liệu vào Google Drive", use_container_width=True)
-
-def apply_form_to_cache(update_selected=True):
+def apply_form_to_cache():
     base = st.session_state["_csv_cache"].copy()
     new_row = {c: st.session_state["_csv_form"].get(c, "") for c in KPI_COLS}
-    new_row["Kế hoạch"] = parse_float(new_row.get("Kế hoạch"))
-    new_row["Thực hiện"] = parse_float(new_row.get("Thực hiện"))
+    new_row["Kế hoạch"] = parse_vn_number(st.session_state.get("plan_txt",""))
+    new_row["Thực hiện"] = parse_vn_number(st.session_state.get("actual_txt",""))
     new_row["Điểm KPI"] = compute_score_with_method(new_row)
-    if update_selected and not selected_rows.empty:
-        idx = selected_rows.index[0]
-        for k, v in new_row.items(): base.loc[idx, k] = v
+
+    sel = st.session_state.get("_selected_idx", None)
+    if sel is not None and sel in base.index:
+        for k, v in new_row.items(): base.loc[sel, k] = v
     else:
         if str(new_row.get("Tên chỉ tiêu (KPI)","")).strip():
             base = pd.concat([base, pd.DataFrame([new_row])], ignore_index=True)
     st.session_state["_csv_cache"] = base
-    # sau khi áp dụng, format lại textbox
+    # format lại 2 textbox
     st.session_state["plan_txt"]   = format_vn_number(new_row.get("Kế hoạch") or 0, 2)
     st.session_state["actual_txt"] = format_vn_number(new_row.get("Thực hiện") or 0, 2)
 
-# ===== NÚT =====
+# ====== NÚT ======
 if apply_clicked:
-    apply_form_to_cache(update_selected=True); toast("Đã áp dụng dữ liệu biểu mẫu vào CSV tạm.","✅"); st.rerun()
+    apply_form_to_cache(); toast("Đã áp dụng dữ liệu biểu mẫu vào CSV tạm.","✅"); st.rerun()
 
 def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI")->bytes:
     try:
@@ -493,7 +489,7 @@ def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI")->bytes:
 
 if save_csv_clicked:
     try:
-        apply_form_to_cache(update_selected=not selected_rows.empty)
+        apply_form_to_cache()
         sh, sheet_name = get_sheet_and_name()
         if write_kpi_to_sheet(sh, sheet_name, st.session_state["_csv_cache"]):
             toast(f"Đã ghi dữ liệu vào sheet '{sheet_name}'.","✅")
@@ -513,7 +509,7 @@ if st.session_state.get("confirm_refresh", False):
             st.session_state["confirm_refresh"] = False; toast("Đã hủy làm mới.","ℹ️")
 
 if export_clicked:
-    apply_form_to_cache(update_selected=not selected_rows.empty)
+    apply_form_to_cache()
     buf_xlsx = io.BytesIO()
     with pd.ExcelWriter(buf_xlsx, engine="xlsxwriter") as writer:
         st.session_state["_csv_cache"].to_excel(writer, index=False, sheet_name="KPI")
@@ -526,7 +522,7 @@ if export_clicked:
 
 if save_drive_clicked:
     try:
-        apply_form_to_cache(update_selected=not selected_rows.empty)
+        apply_form_to_cache()
         service = get_drive_service()
         if service is None: st.stop()
         use_code = st.session_state["_user"].split("\\")[-1].upper()
@@ -542,10 +538,10 @@ if save_drive_clicked:
         buf_xlsx = io.BytesIO()
         with pd.ExcelWriter(buf_xlsx, engine="xlsxwriter") as writer:
             st.session_state["_csv_cache"].to_excel(writer, index=False, sheet_name="KPI")
-        upload_or_update(service, folder_report, fname_xlsx, buf_xlsx.getvalue(),
-                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        media_id_1 = upload_or_update(service, folder_report, fname_xlsx, buf_xlsx.getvalue(),
+                                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], title=f"BÁO CÁO KPI – {use_code}")
         if pdf_bytes:
-            upload_or_update(service, folder_report, fname_pdf, pdf_bytes, "application/pdf")
+            media_id_2 = upload_or_update(service, folder_report, fname_pdf, pdf_bytes, "application/pdf")
         toast(f"Đã lưu: /{use_code}/Báo cáo KPI/{fname_xlsx} & {fname_pdf}","✅")
     except Exception as e: st.error(f"Lỗi lưu Google Drive: {e}")
