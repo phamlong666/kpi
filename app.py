@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.20 UI pinned form + colored buttons + logo URL)
+KPI App – Định Hóa (v3.21)
 - Logo từ GitHub (fallback assets/logo.png)
-- Tiêu đề nhỏ hơn
-- Biểu mẫu nhập được "ghim" trên cùng (sticky) khi cuộn
-- Ẩn nút "Áp dụng vào CSV tạm" nếu đang chọn 1 dòng (chỉ hiện khi thêm mới)
-- Tô màu 4 nút thao tác bằng CSS (~ selector)
-- Giữ toàn bộ RULES engine (PENALTY_FLAG, PENALTY_ERR, EXPR...), Export, Drive
+- Tiêu đề nhỏ hơn (24px)
+- Biểu mẫu nhập GHIM CỐ ĐỊNH (sticky) khi cuộn
+- 4 nút tác vụ mỗi nút 1 màu (marker + adjacent-sibling CSS)
+- Giữ RULES engine & Drive/Export như trước
 """
 
 import re, io, base64, math, ast
@@ -361,7 +360,7 @@ def compute_score_with_method(row):
         elif t=="PASS_FAIL":    return _score_pass_fail(row)
         elif t=="RANGE":        return _score_range(row, overrides)
         elif t=="EXPR" and rule.get("expr"): return _score_expr(row, rule["expr"])
-    # fallback tương thích
+    # fallback
     plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
     actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
     if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
@@ -543,7 +542,7 @@ def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI"):
     except Exception:
         return b""
 
-# ------------------- SIDEBAR (Đăng nhập & cấu hình) -------------------
+# ------------------- SIDEBAR -------------------
 with st.sidebar:
     st.header("🔒 Đăng nhập")
     if "_user" not in st.session_state:
@@ -597,20 +596,22 @@ header_html = f"""
   box-shadow:0 0 0 3px #fff, 0 0 0 6px #ff4b4b20;
 }}
 .app-title {{
-  margin:0; line-height:1.05; font-size:28px; font-weight:800; letter-spacing:.2px;
+  margin:0; line-height:1.05; font-size:24px; font-weight:800; letter-spacing:.15px;
   background: linear-gradient(90deg,#0ea5e9 0%,#22c55e 50%,#a855f7 100%);
   -webkit-background-clip:text; -webkit-text-fill-color:transparent;
 }}
-.app-sub {{ margin:0; color:#64748b; font-size:13px; }}
-/* Pinned form */
-#pin-form {{ position: sticky; top: 8px; z-index: 50; background:#fff; border:1px solid #eef2f7;
-            border-radius:14px; padding:12px 14px; box-shadow:0 6px 18px -10px rgba(0,0,0,.18);}}
-
-/* Button colors using general-sibling selector (~) to be robust */
-.btn-save ~ div.stButton button {{ background:#22c55e !important; color:#fff !important; border-color:#22c55e !important; }}
-.btn-refresh ~ div.stButton button {{ background:#f59e0b !important; color:#111 !important; border-color:#f59e0b !important; }}
-.btn-export ~ div.stButton button {{ background:#3b82f6 !important; color:#fff !important; border-color:#3b82f6 !important; }}
-.btn-drive ~ div.stButton button {{ background:#8b5cf6 !important; color:#fff !important; border-color:#8b5cf6 !important; }}
+.app-sub {{ margin:0; color:#64748b; font-size:12px; }}
+/* Sticky for the container that HAS the pin marker */
+div[data-testid="stVerticalBlock"]:has(> span#pin-marker) {{
+  position: sticky; top: 8px; z-index: 50;
+  background:#fff; border:1px solid #eef2f7; border-radius:14px;
+  padding:12px 14px; box-shadow:0 6px 18px -10px rgba(0,0,0,.18);
+}}
+/* Button colors via marker + adjacent-sibling (reliable) */
+div.btn-save-marker + div.stButton > button {{ background:#22c55e !important; color:#fff !important; border-color:#22c55e !important; }}
+div.btn-refresh-marker + div.stButton > button {{ background:#f59e0b !important; color:#111 !important; border-color:#f59e0b !important; }}
+div.btn-export-marker + div.stButton > button {{ background:#3b82f6 !important; color:#fff !important; border-color:#3b82f6 !important; }}
+div.btn-drive-marker + div.stButton > button {{ background:#8b5cf6 !important; color:#fff !important; border-color:#8b5cf6 !important; }}
 </style>
 <div class="app-header">
   {"<img class='app-logo' src='"+LOGO_URL+"'>" if LOGO_URL else (("<img class='app-logo' src='data:image/png;base64,"+logo64+"'/>") if logo64 else "<div></div>")}
@@ -669,81 +670,82 @@ if st.session_state.get("_prefill_from_row"):
 st.session_state.setdefault("plan_txt",   format_vn_number(st.session_state["_csv_form"].get("Kế hoạch") or 0.0, 2))
 st.session_state.setdefault("actual_txt", format_vn_number(st.session_state["_csv_form"].get("Thực hiện") or 0.0, 2))
 
-# ------------------- FORM (pinned trên cùng) -------------------
+# ------------------- FORM (GHIM CỐ ĐỊNH) -------------------
 st.subheader("✍️ Biểu mẫu nhập tay")
-st.markdown('<div id="pin-form">', unsafe_allow_html=True)  # mở container sticky
+pin = st.container()
+with pin:
+    # marker để CSS bám và ghim container này
+    st.markdown('<span id="pin-marker"></span>', unsafe_allow_html=True)
 
-f = st.session_state["_csv_form"]
+    f = st.session_state["_csv_form"]
 
-def _on_change_plan():
-    val = parse_vn_number(st.session_state["plan_txt"])
-    if val is not None: st.session_state["_csv_form"]["Kế hoạch"] = val
-    st.session_state["plan_txt"] = format_vn_number(st.session_state["_csv_form"]["Kế hoạch"] or 0, 2)
+    def _on_change_plan():
+        val = parse_vn_number(st.session_state["plan_txt"])
+        if val is not None: st.session_state["_csv_form"]["Kế hoạch"] = val
+        st.session_state["plan_txt"] = format_vn_number(st.session_state["_csv_form"]["Kế hoạch"] or 0, 2)
 
-def _on_change_actual():
-    val = parse_vn_number(st.session_state["actual_txt"])
-    if val is not None: st.session_state["_csv_form"]["Thực hiện"] = val
-    st.session_state["actual_txt"] = format_vn_number(st.session_state["_csv_form"]["Thực hiện"] or 0, 2)
+    def _on_change_actual():
+        val = parse_vn_number(st.session_state["actual_txt"])
+        if val is not None: st.session_state["_csv_form"]["Thực hiện"] = val
+        st.session_state["actual_txt"] = format_vn_number(st.session_state["_csv_form"]["Thực hiện"] or 0, 2)
 
-c0 = st.columns([2,1,1,1])
-with c0[0]: f["Tên chỉ tiêu (KPI)"] = st.text_input("Tên chỉ tiêu (KPI)", value=f["Tên chỉ tiêu (KPI)"])
-with c0[1]: f["Đơn vị tính"] = st.text_input("Đơn vị tính", value=f["Đơn vị tính"])
-with c0[2]: f["Bộ phận/người phụ trách"] = st.text_input("Bộ phận/người phụ trách", value=f["Bộ phận/người phụ trách"])
-with c0[3]: f["Tên đơn vị"] = st.text_input("Tên đơn vị", value=f["Tên đơn vị"])
+    c0 = st.columns([2,1,1,1])
+    with c0[0]: f["Tên chỉ tiêu (KPI)"] = st.text_input("Tên chỉ tiêu (KPI)", value=f["Tên chỉ tiêu (KPI)"])
+    with c0[1]: f["Đơn vị tính"] = st.text_input("Đơn vị tính", value=f["Đơn vị tính"])
+    with c0[2]: f["Bộ phận/người phụ trách"] = st.text_input("Bộ phận/người phụ trách", value=f["Bộ phận/người phụ trách"])
+    with c0[3]: f["Tên đơn vị"] = st.text_input("Tên đơn vị", value=f["Tên đơn vị"])
 
-c1 = st.columns(3)
-with c1[0]: st.text_input("Kế hoạch", key="plan_txt", on_change=_on_change_plan)
-with c1[1]: st.text_input("Thực hiện", key="actual_txt", on_change=_on_change_actual)
-with c1[2]: f["Trọng số"] = st.number_input("Trọng số (%)", value=float(f.get("Trọng số") or 0.0))
+    c1 = st.columns(3)
+    with c1[0]: st.text_input("Kế hoạch", key="plan_txt", on_change=_on_change_plan)
+    with c1[1]: st.text_input("Thực hiện", key="actual_txt", on_change=_on_change_actual)
+    with c1[2]: f["Trọng số"] = st.number_input("Trọng số (%)", value=float(f.get("Trọng số") or 0.0))
 
-c2 = st.columns(3)
-with c2[0]:
-    options_methods = [
-        "Tăng tốt hơn","Giảm tốt hơn","Đạt/Không đạt","Trong khoảng",
-        "Phạt khi vi phạm (trừ cố định)",
-        "Sai số ±1,5%: trừ 0,04 điểm/0,1% (max 3)",
-        "Sai số ±1,5%: trừ 0,02 điểm/0,1% (max 3)",
-    ]
-    cur = f.get("Phương pháp đo kết quả","Tăng tốt hơn")
-    f["Phương pháp đo kết quả"] = st.selectbox("Phương pháp đo kết quả", options=options_methods,
-                                               index=options_methods.index(cur) if cur in options_methods else 0)
-with c2[1]:
-    tmp_row = {k:f.get(k) for k in f.keys()}
-    tmp_row["Điểm KPI"] = compute_score_with_method(tmp_row)
-    label_metric = "Điểm trừ (tự tính)" if (tmp_row["Điểm KPI"] is not None and tmp_row["Điểm KPI"]<0) else "Điểm KPI (tự tính)"
-    st.metric(label_metric, tmp_row["Điểm KPI"] if tmp_row["Điểm KPI"] is not None else "—")
-with c2[2]:
-    f["Ghi chú"] = st.text_input("Ghi chú", value=f["Ghi chú"])
+    c2 = st.columns(3)
+    with c2[0]:
+        options_methods = [
+            "Tăng tốt hơn","Giảm tốt hơn","Đạt/Không đạt","Trong khoảng",
+            "Phạt khi vi phạm (trừ cố định)",
+            "Sai số ±1,5%: trừ 0,04 điểm/0,1% (max 3)",
+            "Sai số ±1,5%: trừ 0,02 điểm/0,1% (max 3)",
+        ]
+        cur = f.get("Phương pháp đo kết quả","Tăng tốt hơn")
+        f["Phương pháp đo kết quả"] = st.selectbox("Phương pháp đo kết quả", options=options_methods,
+                                                   index=options_methods.index(cur) if cur in options_methods else 0)
+    with c2[1]:
+        tmp_row = {k:f.get(k) for k in f.keys()}
+        tmp_row["Điểm KPI"] = compute_score_with_method(tmp_row)
+        label_metric = "Điểm trừ (tự tính)" if (tmp_row["Điểm KPI"] is not None and tmp_row["Điểm KPI"]<0) else "Điểm KPI (tự tính)"
+        st.metric(label_metric, tmp_row["Điểm KPI"] if tmp_row["Điểm KPI"] is not None else "—")
+    with c2[2]:
+        f["Ghi chú"] = st.text_input("Ghi chú", value=f["Ghi chú"])
 
-if "khoảng" in f["Phương pháp đo kết quả"].lower():
-    c3 = st.columns(2)
-    with c3[0]: f["Ngưỡng dưới"] = st.text_input("Ngưỡng dưới", value=str(f.get("Ngưỡng dưới") or ""))
-    with c3[1]: f["Ngưỡng trên"] = st.text_input("Ngưỡng trên", value=str(f.get("Ngưỡng trên") or ""))
+    if "khoảng" in f["Phương pháp đo kết quả"].lower():
+        c3 = st.columns(2)
+        with c3[0]: f["Ngưỡng dưới"] = st.text_input("Ngưỡng dưới", value=str(f.get("Ngưỡng dưới") or ""))
+        with c3[1]: f["Ngưỡng trên"] = st.text_input("Ngưỡng trên", value=str(f.get("Ngưỡng trên") or ""))
 
-c4 = st.columns(2)
-with c4[0]: f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
-with c4[1]: f["Năm"]   = st.text_input("Năm",   value=str(f["Năm"]))
+    c4 = st.columns(2)
+    with c4[0]: f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
+    with c4[1]: f["Năm"]   = st.text_input("Năm",   value=str(f["Năm"]))
 
-# "Áp dụng" chỉ hiện khi KHÔNG chọn dòng nào (thêm mới)
-show_apply = st.session_state.get("_selected_idx") is None
-apply_clicked = False
-if show_apply:
-    apply_clicked = st.button("Áp dụng vào bảng CSV tạm", type="primary")
-st.markdown("</div>", unsafe_allow_html=True)  # đóng container sticky
+    # "Áp dụng" chỉ hiện khi KHÔNG chọn dòng nào (thêm mới)
+    show_apply = st.session_state.get("_selected_idx") is None
+    if show_apply:
+        st.button("Áp dụng vào bảng CSV tạm", type="primary")
 
-# ------------------- 4 nút tác vụ (mỗi nút 1 màu) -------------------
+# ------------------- 4 NÚT TÁC VỤ (MỖI NÚT 1 MÀU) -------------------
 b1,b2,b3,b4 = st.columns([1,1,1,2])
 with b1:
-    st.markdown('<div class="btn-save"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="btn-save-marker"></div>', unsafe_allow_html=True)
     save_csv_clicked = st.button("💾 Ghi CSV tạm vào sheet KPI", use_container_width=True)
 with b2:
-    st.markdown('<div class="btn-refresh"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="btn-refresh-marker"></div>', unsafe_allow_html=True)
     refresh_clicked = st.button("🔁 Làm mới bảng CSV", use_container_width=True)
 with b3:
-    st.markdown('<div class="btn-export"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="btn-export-marker"></div>', unsafe_allow_html=True)
     export_clicked = st.button("📤 Xuất báo cáo (Excel/PDF)", use_container_width=True)
 with b4:
-    st.markdown('<div class="btn-drive"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="btn-drive-marker"></div>', unsafe_allow_html=True)
     save_drive_clicked = st.button("☁️ Lưu dữ liệu vào Google Drive (thủ công)", use_container_width=True)
 
 # ------------------- CSV khu vực dưới -------------------
@@ -813,8 +815,7 @@ def apply_form_to_cache():
     st.session_state["_csv_cache"] = base
 
 # --------- Hành động nút ----------
-if apply_clicked:
-    apply_form_to_cache(); toast("Đã áp dụng dữ liệu biểu mẫu vào CSV tạm.","✅"); st.rerun()
+# Nút "Áp dụng..." ở form chỉ hiển thị khi thêm mới; còn lại mọi nút dưới đây đều áp dụng form vào cache trước khi thực hiện
 
 if save_csv_clicked:
     try:
