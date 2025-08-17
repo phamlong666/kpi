@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.11)
+KPI App – Định Hóa (v3.12)
 - Form NHẬP TAY ở TRÊN, bảng CSV ở DƯỚI.
 - Checkbox “✓ Chọn” ổn định sau rerun; chọn 1 dòng để nạp ngược lên form.
-- Phương pháp “Sai số ≤ ±1,5%; mỗi 0,1% vượt trừ 0,02 (max 3)” trả về **điểm trừ 0→3** (không phải 10 - trừ).
-- Ô Kế hoạch/Thực hiện hiển thị **dấu chấm phân tách nghìn** (1.000.000) ngay trong callback.
+- Hai chỉ tiêu DỰ BÁO (tổng thương phẩm & nhóm KH >1 triệu kWh/năm):
+    • Chỉ có ĐIỂM TRỪ, không cộng. Điểm hiển thị sẽ là số ÂM (ví dụ: -0.40).
+    • Mặc định ngưỡng ±1,5%, trừ 0,04 điểm mỗi 0,1% vượt (tối đa 3 điểm).
+    • Nếu mô tả phương pháp ghi “0,02” thì dùng 0,02; ghi “0,04” thì dùng 0,04.
+- Ô Kế hoạch/Thực hiện hiển thị dấu chấm ngăn cách nghìn (1.000.000) ngay trong callback.
 - Ghi Google Sheets (fallback tên sheet nếu trống), Xuất Excel (fallback openpyxl/xlsxwriter/CSV),
   PDF nếu có reportlab, Lưu Google Drive (supportsAllDrives; khuyên Shared Drive).
-- KHẮC PHỤC:
-  1) Không còn lỗi pandas “Invalid value … for dtype 'string'” nhờ ép kiểu số trước khi ghi/cập nhật.
-  2) Không còn hiện tượng “ghi xong bị quay về mặc định theo file” nhờ chỉ nạp CSV khi có file MỚI (ký hiệu name+bytes).
+- Ép kiểu số an toàn khi ghi, tránh lỗi dtype 'string'.
 """
 
 import re
@@ -172,7 +173,31 @@ def to_percent(val):
         return None
     return v * 100.0 if abs(v) <= 1.0 else v
 
-def kpi_penalty_error_method(actual_err_pct, threshold_pct=1.5, step_pct=0.1, per_step_penalty=0.02, max_penalty=3.0):
+# ------------------- QUY TẮC ĐIỂM TRỪ DỰ BÁO -------------------
+def is_penalty_forecast_kpi(row) -> bool:
+    """Xác định 2 nhóm chỉ tiêu DỰ BÁO chỉ có điểm trừ."""
+    name = (row.get("Tên chỉ tiêu (KPI)") or "").strip().lower()
+    method = (row.get("Phương pháp đo kết quả") or "").strip().lower()
+    if "dự báo tổng thương phẩm" in name:
+        return True
+    # hoặc mô tả phương pháp có 'sai số' và 'trừ'
+    if ("sai số" in method or "sai so" in method) and ("trừ" in method or "tru" in method):
+        return True
+    return False
+
+def parse_penalty_step(method_text: str, default_step=0.04) -> float:
+    """Tìm 0,04 hoặc 0,02 trong mô tả. Mặc định 0,04 theo yêu cầu mới."""
+    if not method_text:
+        return default_step
+    t = method_text.lower()
+    if re.search(r"0[,\.]0?4", t):
+        return 0.04
+    if re.search(r"0[,\.]0?2", t):
+        return 0.02
+    return default_step
+
+def kpi_penalty_error_method(actual_err_pct, threshold_pct=1.5, step_pct=0.1, per_step_penalty=0.04, max_penalty=3.0):
+    """Tính điểm trừ theo % sai số vượt ngưỡng (0 → 3)."""
     if actual_err_pct is None:
         return 0.0, None
     exceed = max(0.0, actual_err_pct - threshold_pct)
@@ -188,15 +213,20 @@ def compute_score_generic(plan, actual, weight):
     return round(ratio * 10 * w, 2)
 
 def compute_score_with_method(row):
+    """Trả về:
+       - Nếu là 2 nhóm DỰ BÁO (hoặc mô tả 'sai số ... trừ ...'): TRẢ VỀ ĐIỂM KPI ÂM = -điểm trừ (0→-3).
+       - Các phương pháp khác: TRẢ VỀ điểm KPI đã nhân trọng số (0→10*w)."""
     plan   = parse_vn_number(st.session_state.get("plan_txt",""))   if "plan_txt"   in st.session_state else None
     actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
     if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
     if actual is None: actual = parse_float(row.get("Thực hiện"))
 
     weight = parse_float(row.get("Trọng số")) or 0.0
-    method = str(row.get("Phương pháp đo kết quả") or "").strip().lower()
+    method = str(row.get("Phương pháp đo kết quả") or "").strip()
+    method_l = method.lower()
 
-    if ("sai số" in method or "sai so" in method) and ("0,02" in method or "0.02" in method):
+    # --- PHƯƠNG PHÁP ĐIỂM TRỪ CHO 2 NHÓM DỰ BÁO ---
+    if is_penalty_forecast_kpi(row):
         unit = str(row.get("Đơn vị tính") or "").lower()
         actual_err_pct = None
         if actual is not None:
@@ -205,34 +235,42 @@ def compute_score_with_method(row):
             elif plan not in (None, 0):
                 actual_err_pct = abs(actual - plan) / abs(plan) * 100.0
 
+        # Ngưỡng & bước trừ
         threshold = 1.5
-        m = re.search(r"(\d+)[\.,](\d+)", method)
+        # cố gắng đọc 1,5 từ mô tả nếu có
+        m = re.search(r"(\d+)[\.,](\d+)", method_l)
         if m:
-            try: threshold = float(m.group(1) + "." + m.group(2))
-            except: threshold = 1.5
+            try:
+                threshold = float(m.group(1) + "." + m.group(2))
+            except:
+                threshold = 1.5
         else:
             thr = parse_float(row.get("Ngưỡng trên"))
-            if thr is not None: threshold = thr
+            if thr is not None:
+                threshold = thr
 
-        penalty, _ = kpi_penalty_error_method(actual_err_pct, threshold, 0.1, 0.02, 3.0)
-        return round(penalty, 2)
+        per_step = parse_penalty_step(method_l, default_step=0.04)  # ưu tiên 0,04 theo yêu cầu mới
+        penalty, _ = kpi_penalty_error_method(actual_err_pct, threshold, 0.1, per_step, 3.0)
+        # QUY ƯỚC: Điểm KPI hiển thị là ÂM để thể hiện điểm trừ
+        return -round(penalty, 2)
 
+    # --- CÁC PHƯƠNG PHÁP KHÁC ---
     if plan in (None, 0) or actual is None:
         return None
     w = weight / 100.0 if (weight and weight > 1) else (weight or 0.0)
 
-    if any(k in method for k in ["tăng", ">=", "cao hơn tốt", "increase", "higher"]):
+    if any(k in method_l for k in ["tăng", ">=", "cao hơn tốt", "increase", "higher"]):
         return round(max(min(actual / plan, 2.0), 0.0) * 10 * w, 2)
-    if any(k in method for k in ["giảm", "<=", "thấp hơn tốt", "decrease", "lower"]):
+    if any(k in method_l for k in ["giảm", "<=", "thấp hơn tốt", "decrease", "lower"]):
         ratio = 1.0 if actual <= plan else max(min(plan / actual, 2.0), 0.0)
         return round(ratio * 10 * w, 2)
-    if any(k in method for k in ["đạt", "dat", "bool", "pass/fail"]):
+    if any(k in method_l for k in ["đạt", "dat", "bool", "pass/fail"]):
         return round((10.0 if actual >= plan else 0.0) * w, 2)
-    if any(k in method for k in ["khoảng", "range", "trong khoảng"]):
+    if any(k in method_l for k in ["khoảng", "range", "trong khoảng"]):
         lo = parse_float(row.get("Ngưỡng dưới")); hi = parse_float(row.get("Ngưỡng trên"))
         if lo is None or hi is None:
             return round(max(min(actual/plan, 2.0), 0.0) * 10 * w, 2)
-        return round((10.0 if (lo <= actual <= hi) else 0.0) * 10 * w, 2)
+        return round((10.0 if (lo <= actual <= hi) else 0.0) * w, 2)  # <— chỉ * w, không *10 lần nữa
 
     return compute_score_generic(plan, actual, weight)
 
@@ -496,13 +534,13 @@ def _on_change_plan():
     val = parse_vn_number(st.session_state["plan_txt"])
     if val is not None:
         st.session_state["_csv_form"]["Kế hoạch"] = val
-        st.session_state["plan_txt"] = format_vn_number(val, 2)
+    st.session_state["plan_txt"] = format_vn_number(st.session_state["_csv_form"]["Kế hoạch"] or 0, 2)
 
 def _on_change_actual():
     val = parse_vn_number(st.session_state["actual_txt"])
     if val is not None:
         st.session_state["_csv_form"]["Thực hiện"] = val
-        st.session_state["actual_txt"] = format_vn_number(val, 2)
+    st.session_state["actual_txt"] = format_vn_number(st.session_state["_csv_form"]["Thực hiện"] or 0, 2)
 
 c0 = st.columns([2,1,1,1])
 with c0[0]:
@@ -526,7 +564,8 @@ c2 = st.columns(3)
 with c2[0]:
     options_methods = [
         "Tăng tốt hơn", "Giảm tốt hơn", "Đạt/Không đạt", "Trong khoảng",
-        "Sai số ≤ ±1,5%: mỗi 0,1% vượt trừ 0,02 (max 3)",
+        "Sai số ±1,5%: trừ 0,04 điểm/0,1% (max 3)",
+        "Sai số ±1,5%: trừ 0,02 điểm/0,1% (max 3)",
     ]
     cur = f.get("Phương pháp đo kết quả", "Tăng tốt hơn")
     f["Phương pháp đo kết quả"] = st.selectbox("Phương pháp đo kết quả",
@@ -536,13 +575,12 @@ with c2[0]:
 with c2[1]:
     tmp_row = {k: f.get(k) for k in f.keys()}
     tmp_row["Điểm KPI"] = compute_score_with_method(tmp_row)
-    is_penalty = "sai số" in f.get("Phương pháp đo kết quả","").lower() and ("0,02" in f["Phương pháp đo kết quả"] or "0.02" in f["Phương pháp đo kết quả"])
-    label_metric = "Điểm trừ (tự tính)" if is_penalty else "Điểm KPI (tự tính)"
+    label_metric = "Điểm trừ (tự tính)" if is_penalty_forecast_kpi(tmp_row) else "Điểm KPI (tự tính)"
     st.metric(label_metric, tmp_row["Điểm KPI"] if tmp_row["Điểm KPI"] is not None else "—")
 with c2[2]:
     f["Ghi chú"] = st.text_input("Ghi chú", value=f["Ghi chú"])
 
-if f["Phương pháp đo kết quả"] == "Trong khoảng":
+if f["Phương pháp đo kết quả"].lower().startswith("trong khoảng") or "khoảng" in f["Phương pháp đo kết quả"].lower():
     c3 = st.columns(2)
     with c3[0]:
         f["Ngưỡng dưới"] = st.text_input("Ngưỡng dưới", value=str(f.get("Ngưỡng dưới") or ""))
@@ -619,12 +657,11 @@ def apply_form_to_cache():
     new_row = {c: st.session_state["_csv_form"].get(c, "") for c in KPI_COLS}
     new_row["Kế hoạch"]  = parse_vn_number(st.session_state.get("plan_txt", ""))
     new_row["Thực hiện"] = parse_vn_number(st.session_state.get("actual_txt", ""))
-    new_row["Điểm KPI"]  = compute_score_with_method(new_row)
+    new_row["Điểm KPI"]  = compute_score_with_method(new_row)  # sẽ là ÂM cho 2 chỉ tiêu dự báo
 
     sel = st.session_state.get("_selected_idx", None)
     if sel is not None and sel in base.index:
         for k, v in new_row.items():
-            # nếu cột là số nhưng v là None -> để NaN; nếu cột là text -> ép str
             if k in NUMERIC_COLS:
                 base.loc[sel, k] = pd.to_numeric(pd.Series([v]), errors="coerce").iloc[0]
             else:
