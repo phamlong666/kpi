@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.12)
-- Form NHẬP TAY ở TRÊN, bảng CSV ở DƯỚI.
-- Checkbox “✓ Chọn” ổn định sau rerun; chọn 1 dòng để nạp ngược lên form.
-- Hai chỉ tiêu DỰ BÁO (tổng thương phẩm & nhóm KH >1 triệu kWh/năm):
-    • Chỉ có ĐIỂM TRỪ, không cộng. Điểm hiển thị sẽ là số ÂM (ví dụ: -0.40).
-    • Mặc định ngưỡng ±1,5%, trừ 0,04 điểm mỗi 0,1% vượt (tối đa 3 điểm).
-    • Nếu mô tả phương pháp ghi “0,02” thì dùng 0,02; ghi “0,04” thì dùng 0,04.
-- Ô Kế hoạch/Thực hiện hiển thị dấu chấm ngăn cách nghìn (1.000.000) ngay trong callback.
-- Ghi Google Sheets (fallback tên sheet nếu trống), Xuất Excel (fallback openpyxl/xlsxwriter/CSV),
-  PDF nếu có reportlab, Lưu Google Drive (supportsAllDrives; khuyên Shared Drive).
-- Ép kiểu số an toàn khi ghi, tránh lỗi dtype 'string'.
+KPI App – Định Hóa (v3.14)
+- Không tách mỗi đơn vị thành 1 sheet. Dùng 1 sheet KPI chung (tên do anh đặt).
+- MỖI ĐƠN VỊ DÙNG CHÍNH THƯ MỤC ROOT CỦA HỌ (không thêm lớp <USE-code>):
+  <Root của đơn vị> / Báo cáo KPI / YYYY-MM / KPI_YYYY-MM-DD_HHMM.xlsx (+ PDF nếu có)
+- Hai chỉ tiêu DỰ BÁO: chỉ có ĐIỂM TRỪ (âm), ngưỡng ±1,5%, trừ 0,04 đ/0,1% (max 3). Nếu mô tả ghi 0,02 thì dùng 0,02.
+- Số nhập có dấu chấm ngăn cách nghìn; ép kiểu số khi ghi để tránh dtype 'string'.
+- Ổn định chọn dòng → prefill form → áp dụng trở lại CSV tạm, ghi xong cập nhật ngay bảng.
 """
 
 import re
@@ -22,7 +18,7 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Google Drive API (tùy môi trường)
+# Google Drive API
 try:
     from googleapiclient.discovery import build as gbuild
     from googleapiclient.http import MediaIoBaseUpload
@@ -38,15 +34,14 @@ APP_TITLE = "📊 KPI – Đội quản lý Điện lực khu vực Định Hóa
 
 GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"  # ví dụ
 KPI_SHEET_DEFAULT       = "KPI"
-APP_KPI_DRIVE_ROOT_ID_DEFAULT = "1rE3E8CuPViw8-VYWYZgeB4Mz9WEY3e7"            # thư mục App_KPI
 
 defaults = {
     "spreadsheet_id": GOOGLE_SHEET_ID_DEFAULT,
     "kpi_sheet_name":  KPI_SHEET_DEFAULT,
-    "drive_root_id":   APP_KPI_DRIVE_ROOT_ID_DEFAULT,
-    "_report_folder_id": "",
+    "drive_root_id":   "",                 # mỗi đơn vị dán ROOT của chính họ (ID hoặc URL folder)
     "_selected_idx": None,
-    "_csv_loaded_sig": "",   # chữ ký file CSV đã nạp (tên + kích thước bytes)
+    "_csv_loaded_sig": "",                 # chữ ký file CSV đã nạp (tên + kích thước bytes)
+    "auto_save_drive": True,               # Tự động lưu Drive khi Ghi/Xuất
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -127,15 +122,13 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     cols_lower = {c.strip().lower(): c for c in df.columns}
     rename = {}
     for std, cands in ALIAS.items():
-        if std in df.columns:
-            continue
+        if std in df.columns: continue
         for c in cands:
             key = c.strip().lower()
             if key in cols_lower:
                 rename[cols_lower[key]] = std
                 break
-    if rename:
-        df = df.rename(columns=rename)
+    if rename: df = df.rename(columns=rename)
     if "Thực hiện (tháng)" in df.columns and "Thực hiện" not in df.columns:
         df = df.rename(columns={"Thực hiện (tháng)": "Thực hiện"})
     if "Kế hoạch (tháng)" in df.columns and "Kế hoạch" not in df.columns:
@@ -143,79 +136,58 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def format_vn_number(x, decimals=2):
-    try:
-        f = float(x)
-    except:
-        return ""
+    try: f = float(x)
+    except: return ""
     s = f"{f:,.{decimals}f}"
     return s.replace(",", "_").replace(".", ",").replace("_", ".")
 
 def parse_vn_number(s):
-    if s is None:
-        return None
+    if s is None: return None
     txt = str(s).strip()
-    if txt == "" or txt.lower() in ("none", "nan"):
-        return None
+    if txt == "" or txt.lower() in ("none", "nan"): return None
     txt = txt.replace(".", "").replace(",", ".")
-    try:
-        return float(txt)
-    except:
-        return None
+    try: return float(txt)
+    except: return None
 
 def parse_float(x):
-    if isinstance(x, (int, float)):
-        return float(x)
+    if isinstance(x, (int, float)): return float(x)
     return parse_vn_number(x)
 
 def to_percent(val):
     v = parse_float(val)
-    if v is None:
-        return None
+    if v is None: return None
     return v * 100.0 if abs(v) <= 1.0 else v
 
-# ------------------- QUY TẮC ĐIỂM TRỪ DỰ BÁO -------------------
+# ---------- QUY TẮC ĐIỂM TRỪ DỰ BÁO ----------
 def is_penalty_forecast_kpi(row) -> bool:
-    """Xác định 2 nhóm chỉ tiêu DỰ BÁO chỉ có điểm trừ."""
     name = (row.get("Tên chỉ tiêu (KPI)") or "").strip().lower()
     method = (row.get("Phương pháp đo kết quả") or "").strip().lower()
-    if "dự báo tổng thương phẩm" in name:
-        return True
-    # hoặc mô tả phương pháp có 'sai số' và 'trừ'
-    if ("sai số" in method or "sai so" in method) and ("trừ" in method or "tru" in method):
-        return True
+    if "dự báo tổng thương phẩm" in name: return True
+    if ("sai số" in method or "sai so" in method) and ("trừ" in method or "tru" in method): return True
     return False
 
 def parse_penalty_step(method_text: str, default_step=0.04) -> float:
-    """Tìm 0,04 hoặc 0,02 trong mô tả. Mặc định 0,04 theo yêu cầu mới."""
-    if not method_text:
-        return default_step
+    if not method_text: return default_step
     t = method_text.lower()
-    if re.search(r"0[,\.]0?4", t):
-        return 0.04
-    if re.search(r"0[,\.]0?2", t):
-        return 0.02
+    if re.search(r"0[,\.]0?4", t): return 0.04
+    if re.search(r"0[,\.]0?2", t): return 0.02
     return default_step
 
 def kpi_penalty_error_method(actual_err_pct, threshold_pct=1.5, step_pct=0.1, per_step_penalty=0.04, max_penalty=3.0):
-    """Tính điểm trừ theo % sai số vượt ngưỡng (0 → 3)."""
-    if actual_err_pct is None:
-        return 0.0, None
+    if actual_err_pct is None: return 0.0, None
     exceed = max(0.0, actual_err_pct - threshold_pct)
     steps = int(exceed // step_pct)
     penalty = min(max_penalty, steps * per_step_penalty)
     return penalty, max(0.0, 10.0 - penalty)
 
 def compute_score_generic(plan, actual, weight):
-    if plan in (None, 0) or actual is None:
-        return None
+    if plan in (None, 0) or actual is None: return None
     ratio = max(min(actual / plan, 2.0), 0.0)
     w = weight / 100.0 if (weight and weight > 1) else (weight or 0.0)
     return round(ratio * 10 * w, 2)
 
 def compute_score_with_method(row):
-    """Trả về:
-       - Nếu là 2 nhóm DỰ BÁO (hoặc mô tả 'sai số ... trừ ...'): TRẢ VỀ ĐIỂM KPI ÂM = -điểm trừ (0→-3).
-       - Các phương pháp khác: TRẢ VỀ điểm KPI đã nhân trọng số (0→10*w)."""
+    """DỰ BÁO → trả điểm KPI ÂM = -penalty (0→-3). Khác → điểm KPI theo trọng số."""
     plan   = parse_vn_number(st.session_state.get("plan_txt",""))   if "plan_txt"   in st.session_state else None
     actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
     if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
@@ -225,7 +197,7 @@ def compute_score_with_method(row):
     method = str(row.get("Phương pháp đo kết quả") or "").strip()
     method_l = method.lower()
 
-    # --- PHƯƠNG PHÁP ĐIỂM TRỪ CHO 2 NHÓM DỰ BÁO ---
+    # --- DỰ BÁO: điểm trừ (âm) ---
     if is_penalty_forecast_kpi(row):
         unit = str(row.get("Đơn vị tính") or "").lower()
         actual_err_pct = None
@@ -234,31 +206,21 @@ def compute_score_with_method(row):
                 actual_err_pct = to_percent(actual)
             elif plan not in (None, 0):
                 actual_err_pct = abs(actual - plan) / abs(plan) * 100.0
-
-        # Ngưỡng & bước trừ
         threshold = 1.5
-        # cố gắng đọc 1,5 từ mô tả nếu có
         m = re.search(r"(\d+)[\.,](\d+)", method_l)
         if m:
-            try:
-                threshold = float(m.group(1) + "." + m.group(2))
-            except:
-                threshold = 1.5
+            try: threshold = float(m.group(1) + "." + m.group(2))
+            except: threshold = 1.5
         else:
             thr = parse_float(row.get("Ngưỡng trên"))
-            if thr is not None:
-                threshold = thr
-
-        per_step = parse_penalty_step(method_l, default_step=0.04)  # ưu tiên 0,04 theo yêu cầu mới
+            if thr is not None: threshold = thr
+        per_step = parse_penalty_step(method_l, default_step=0.04)
         penalty, _ = kpi_penalty_error_method(actual_err_pct, threshold, 0.1, per_step, 3.0)
-        # QUY ƯỚC: Điểm KPI hiển thị là ÂM để thể hiện điểm trừ
         return -round(penalty, 2)
 
     # --- CÁC PHƯƠNG PHÁP KHÁC ---
-    if plan in (None, 0) or actual is None:
-        return None
+    if plan in (None, 0) or actual is None: return None
     w = weight / 100.0 if (weight and weight > 1) else (weight or 0.0)
-
     if any(k in method_l for k in ["tăng", ">=", "cao hơn tốt", "increase", "higher"]):
         return round(max(min(actual / plan, 2.0), 0.0) * 10 * w, 2)
     if any(k in method_l for k in ["giảm", "<=", "thấp hơn tốt", "decrease", "lower"]):
@@ -270,11 +232,10 @@ def compute_score_with_method(row):
         lo = parse_float(row.get("Ngưỡng dưới")); hi = parse_float(row.get("Ngưỡng trên"))
         if lo is None or hi is None:
             return round(max(min(actual/plan, 2.0), 0.0) * 10 * w, 2)
-        return round((10.0 if (lo <= actual <= hi) else 0.0) * w, 2)  # <— chỉ * w, không *10 lần nữa
-
+        return round((10.0 if (lo <= actual <= hi) else 0.0) * w, 2)
     return compute_score_generic(plan, actual, weight)
 
-# ------------------- ÉP KIỂU SỐ AN TOÀN -------------------
+# ------------------- ÉP KIỂU SỐ -------------------
 NUMERIC_COLS = ["Kế hoạch", "Thực hiện", "Trọng số", "Ngưỡng dưới", "Ngưỡng trên", "Điểm KPI"]
 def coerce_numeric_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -345,28 +306,43 @@ def ensure_folder(service, parent_id: str, name: str) -> str:
     folder = service.files().create(body=meta, fields="id", supportsAllDrives=True).execute()
     return folder["id"]
 
-def find_file_in_folder(service, parent_id: str, name: str):
-    q = (f"name='{name}' and '{parent_id}' in parents and "
-         "mimeType!='application/vnd.google-apps.folder' and trashed=false")
-    res = service.files().list(q=q, spaces="drive", supportsAllDrives=True,
-                               includeItemsFromAllDrives=True, fields="files(id,name,mimeType)").execute()
-    files = res.get("files", [])
-    return files[0] if files else None
-
-def upload_or_update(service, parent_id: str, filename: str, data: bytes, mime: str) -> str:
+def upload_new(service, parent_id: str, filename: str, data: bytes, mime: str) -> str:
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
-    existing = find_file_in_folder(service, parent_id, filename)
-    if existing:
-        f = service.files().update(fileId=existing["id"], media_body=media,
-                                   supportsAllDrives=True, fields="id").execute()
-        return f["id"]
     meta = {"name": filename, "parents": [parent_id]}
-    try:
-        f = service.files().create(body=meta, media_body=media, fields="id",
-                                   supportsAllDrives=True).execute()
-        return f["id"]
-    except HttpError as e:
-        raise RuntimeError("Service account không có quota ở My Drive. Dùng Shared Drive hoặc UPDATE file có sẵn.") from e
+    f = service.files().create(body=meta, media_body=media, fields="id",
+                               supportsAllDrives=True).execute()
+    return f["id"]
+
+def save_report_to_drive(excel_bytes: bytes, pdf_bytes: bytes|None):
+    """Lưu trực tiếp vào ROOT của ĐƠN VỊ (không thêm lớp <USE-code>):
+       <Root của đơn vị> / Báo cáo KPI / YYYY-MM / KPI_YYYY-MM-DD_HHMM.xlsx (+ PDF)"""
+    service = get_drive_service()
+    if service is None:
+        st.warning("Chưa cài google-api-python-client nên không thể lưu Drive.")
+        return
+    root_raw = st.session_state.get("drive_root_id", "").strip()
+    if not root_raw:
+        st.error("Chưa khai báo ID/URL thư mục gốc (của đơn vị).")
+        return
+    root_id = extract_drive_folder_id(root_raw)
+    # Cấu trúc: root / Báo cáo KPI / YYYY-MM
+    folder_kpi   = ensure_folder(service, root_id, "Báo cáo KPI")
+    month_name   = datetime.now().strftime("%Y-%m")
+    folder_month = ensure_folder(service, folder_kpi, month_name)
+
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M")
+    fname_xlsx = f"KPI_{ts}.xlsx"
+    upload_new(service, folder_month, fname_xlsx, excel_bytes,
+               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    toast(f"✅ Đã lưu Drive: /Báo cáo KPI/{month_name}/{fname_xlsx}", "✅")
+
+    if pdf_bytes:
+        try:
+            fname_pdf = f"KPI_{ts}.pdf"
+            upload_new(service, folder_month, fname_pdf, pdf_bytes, "application/pdf")
+            toast(f"✅ Đã lưu thêm PDF: {fname_pdf}", "✅")
+        except Exception:
+            st.info("Không tạo được PDF (thiếu thư viện reportlab?).")
 
 # ------------------- XUẤT EXCEL/PDF -------------------
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -433,26 +409,14 @@ with st.sidebar:
         st.text_input("ID/URL Google Sheet", key="spreadsheet_id")
         st.text_input("Tên sheet KPI", key="kpi_sheet_name")
 
-        st.subheader("📁 Thư mục lưu báo cáo (Drive)")
-        st.text_input("ID/URL thư mục gốc App_KPI", key="drive_root_id")
-        st.caption("Khuyến nghị: Shared Drive để tránh quota 403.")
-
-        if st.button("🔧 Chuẩn bị thư mục báo cáo", use_container_width=True):
-            try:
-                service = get_drive_service()
-                if service is None: st.stop()
-                use_code = st.session_state["_user"].split("\\")[-1].upper()
-                root_id  = extract_drive_folder_id(st.session_state.get("drive_root_id") or APP_KPI_DRIVE_ROOT_ID_DEFAULT)
-                folder_user   = ensure_folder(service, root_id, use_code)
-                folder_report = ensure_folder(service, folder_user, "Báo cáo KPI")
-                st.session_state["_report_folder_id"] = folder_report
-                toast(f"Đã sẵn sàng: /{use_code}/Báo cáo KPI", "✅")
-            except Exception as e:
-                st.error(f"Lỗi chuẩn bị thư mục: {e}")
+        st.subheader("📁 Lưu Google Drive (mỗi đơn vị dùng ROOT của chính mình)")
+        st.text_input("ID/URL thư mục gốc (của đơn vị)", key="drive_root_id",
+                      help="Dán URL thư mục hoặc ID. Phải share quyền 'Editor' cho service account.")
+        st.checkbox("Tự động lưu Drive khi Ghi/Xuất", key="auto_save_drive",
+                    help="Bật: mỗi lần Ghi/Xuất sẽ upload file vào thư mục đơn vị/Tháng.")
 
         if st.button("Đăng xuất", use_container_width=True):
             st.session_state.pop("_user", None)
-            st.session_state["_report_folder_id"] = ""
             toast("Đã đăng xuất.", "✅")
             st.rerun()
 
@@ -476,11 +440,10 @@ def get_sheet_and_name():
 
 def write_kpi_to_sheet(sh, sheet_name: str, df: pd.DataFrame) -> bool:
     df = normalize_columns(df.copy())
-    df = coerce_numeric_cols(df)  # đảm bảo cột số là số trước khi tính/ghi
+    df = coerce_numeric_cols(df)
     if "Điểm KPI" not in df.columns:
         df["Điểm KPI"] = df.apply(compute_score_with_method, axis=1)
     cols = [c for c in KPI_COLS if c in df.columns] + [c for c in df.columns if c not in KPI_COLS]
-    # tất cả sang str để update gspread an toàn
     data = [cols] + df[cols].fillna("").astype(str).values.tolist()
     try:
         try:
@@ -580,7 +543,7 @@ with c2[1]:
 with c2[2]:
     f["Ghi chú"] = st.text_input("Ghi chú", value=f["Ghi chú"])
 
-if f["Phương pháp đo kết quả"].lower().startswith("trong khoảng") or "khoảng" in f["Phương pháp đo kết quả"].lower():
+if "khoảng" in f["Phương pháp đo kết quả"].lower():
     c3 = st.columns(2)
     with c3[0]:
         f["Ngưỡng dưới"] = st.text_input("Ngưỡng dưới", value=str(f.get("Ngưỡng dưới") or ""))
@@ -596,7 +559,7 @@ apply_clicked      = btns[0].button("Áp dụng vào bảng CSV tạm", type="pr
 save_csv_clicked   = btns[1].button("💾 Ghi CSV tạm vào sheet KPI", use_container_width=True)
 refresh_clicked    = btns[2].button("🔁 Làm mới bảng CSV", use_container_width=True)
 export_clicked     = btns[3].button("📤 Xuất báo cáo (Excel/PDF)", use_container_width=True)
-save_drive_clicked = btns[4].button("☁️ Lưu dữ liệu vào Google Drive", use_container_width=True)
+save_drive_clicked = btns[4].button("☁️ Lưu dữ liệu vào Google Drive (thủ công)", use_container_width=True)
 
 # ------------------- CSV DƯỚI -------------------
 st.subheader("⬇️ Nhập CSV vào KPI")
@@ -604,7 +567,7 @@ up = st.file_uploader("Tải file CSV", type=["csv"])
 if "_csv_cache" not in st.session_state:
     st.session_state["_csv_cache"] = pd.DataFrame(columns=KPI_COLS)
 
-# Chỉ nạp CSV KHI có file mới (tránh ghi đè dữ liệu đã chỉnh mỗi rerun)
+# Chỉ nạp CSV khi file MỚI
 if up is not None:
     up_bytes = up.getvalue()
     sig = f"{getattr(up, 'name', '')}:{len(up_bytes)}"
@@ -637,7 +600,7 @@ df_edit = st.data_editor(
     key="csv_editor",
 )
 
-# Cập nhật cache từ editor và ÉP KIỂU SỐ (tránh dtype 'string' cho cột số)
+# Cập nhật cache từ editor & ép kiểu số
 df_cache = df_edit.drop(columns=["✓ Chọn"], errors="ignore").copy()
 df_cache = coerce_numeric_cols(df_cache)
 st.session_state["_csv_cache"] = df_cache
@@ -650,14 +613,14 @@ if new_sel != st.session_state.get("_selected_idx"):
         st.session_state["_prefill_from_row"] = st.session_state["_csv_cache"].loc[new_sel].to_dict()
     st.rerun()
 
-# áp dụng form vào cache (KHÔNG đụng plan_txt/actual_txt ngoài callback)
+# --- Áp dụng form vào cache ---
 def apply_form_to_cache():
     base = st.session_state["_csv_cache"].copy()
-    base = coerce_numeric_cols(base)  # đảm bảo cột số là số trước khi gán
+    base = coerce_numeric_cols(base)
     new_row = {c: st.session_state["_csv_form"].get(c, "") for c in KPI_COLS}
     new_row["Kế hoạch"]  = parse_vn_number(st.session_state.get("plan_txt", ""))
     new_row["Thực hiện"] = parse_vn_number(st.session_state.get("actual_txt", ""))
-    new_row["Điểm KPI"]  = compute_score_with_method(new_row)  # sẽ là ÂM cho 2 chỉ tiêu dự báo
+    new_row["Điểm KPI"]  = compute_score_with_method(new_row)
 
     sel = st.session_state.get("_selected_idx", None)
     if sel is not None and sel in base.index:
@@ -667,25 +630,29 @@ def apply_form_to_cache():
             else:
                 base.loc[sel, k] = "" if v is None else str(v)
     else:
-        # thêm dòng mới
         base = pd.concat([base, pd.DataFrame([new_row])], ignore_index=True)
         base = coerce_numeric_cols(base)
 
     st.session_state["_csv_cache"] = base
 
+# --------- NÚT HÀNH ĐỘNG ----------
 if apply_clicked:
     apply_form_to_cache()
     toast("Đã áp dụng dữ liệu biểu mẫu vào CSV tạm.", "✅")
     st.rerun()
 
-# --------- Ghi/Refresh/Export/Drive ----------
 if save_csv_clicked:
     try:
-        apply_form_to_cache()  # cập nhật ngay bảng bên dưới
+        apply_form_to_cache()
         sh, sheet_name = get_sheet_and_name()
         if write_kpi_to_sheet(sh, sheet_name, st.session_state["_csv_cache"]):
-            toast(f"Đã ghi dữ liệu vào sheet '{sheet_name}'.", "✅")
-            st.rerun()  # đảm bảo bảng hiển thị đúng dữ liệu mới
+            toast(f"Đã ghi vào sheet '{sheet_name}'.", "✅")
+            # Auto save Drive nếu bật
+            if st.session_state.get("auto_save_drive", False):
+                excel_bytes = df_to_excel_bytes(st.session_state["_csv_cache"])
+                pdf_bytes   = generate_pdf_from_df(st.session_state["_csv_cache"], "BÁO CÁO KPI")
+                save_report_to_drive(excel_bytes, pdf_bytes if pdf_bytes else None)
+            st.rerun()
     except Exception as e:
         st.error(f"Lỗi khi ghi Sheets: {e}")
 
@@ -709,7 +676,7 @@ if st.session_state.get("confirm_refresh", False):
             toast("Đã hủy làm mới.", "ℹ️")
 
 if export_clicked:
-    apply_form_to_cache()  # cập nhật rồi mới xuất
+    apply_form_to_cache()
     excel_bytes = df_to_excel_bytes(st.session_state["_csv_cache"])
     st.download_button("⬇️ Tải báo cáo (Excel/CSV)", data=excel_bytes,
                        file_name="KPI_baocao.xlsx", mime="application/octet-stream")
@@ -717,25 +684,15 @@ if export_clicked:
     if pdf_bytes:
         st.download_button("⬇️ Tải PDF báo cáo", data=pdf_bytes,
                            file_name="KPI_baocao.pdf", mime="application/pdf")
+    # Auto save Drive nếu bật
+    if st.session_state.get("auto_save_drive", False):
+        save_report_to_drive(excel_bytes, pdf_bytes if pdf_bytes else None)
 
 if save_drive_clicked:
     try:
         apply_form_to_cache()
-        service = get_drive_service()
-        if service is None: st.stop()
-        use_code = st.session_state["_user"].split("\\")[-1].upper()
-        folder_report = st.session_state.get("_report_folder_id") or ""
-        root_raw = st.session_state.get("drive_root_id") or APP_KPI_DRIVE_ROOT_ID_DEFAULT
-        root_id = extract_drive_folder_id(root_raw)
-        if not folder_report:
-            folder_user = ensure_folder(service, root_id, use_code)
-            folder_report = ensure_folder(service, folder_user, "Báo cáo KPI")
-            st.session_state["_report_folder_id"] = folder_report
-        ts = datetime.now().strftime("%d-%m-%y")
-        fname_xlsx = f"KPI_{ts}.xlsx"
         excel_bytes = df_to_excel_bytes(st.session_state["_csv_cache"])
-        upload_or_update(service, folder_report, fname_xlsx, excel_bytes,
-                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        toast(f"Đã lưu: /{use_code}/Báo cáo KPI/{fname_xlsx}", "✅")
+        pdf_bytes   = generate_pdf_from_df(st.session_state["_csv_cache"], "BÁO CÁO KPI")
+        save_report_to_drive(excel_bytes, pdf_bytes if pdf_bytes else None)
     except Exception as e:
         st.error(f"Lỗi lưu Google Drive: {e}")
