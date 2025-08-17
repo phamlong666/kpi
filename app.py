@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.17, UI fix)
-- Header có logo tròn + Fallback logo nếu chưa có file (hiển thị "KPI" trong vòng tròn gradient)
-- 4 nút hành động mỗi nút 1 màu (ổn định bằng anchor riêng từng nút, không phụ thuộc DOM thứ tự)
+KPI App – Định Hóa (v3.18, RULES engine + UI)
+- Header có logo tròn (fallback nếu chưa có logo)
+- 4 nút hành động mỗi nút 1 màu (ổn định với anchor riêng)
+- RULES engine: tách luật chấm điểm ra bảng RULES trong Google Sheet, hỗ trợ override tại chỗ
+- Sidebar có nút 🔄 Nạp lại RULES
 - Giữ logic: đăng nhập, đọc/ghi Google Sheets, xuất Excel/PDF, (tuỳ chọn) lưu Google Drive
 """
 
@@ -17,7 +19,7 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Google Drive API
+# Google Drive API (tuỳ chọn)
 try:
     from googleapiclient.discovery import build as gbuild
     from googleapiclient.http import MediaIoBaseUpload
@@ -38,7 +40,7 @@ KPI_SHEET_DEFAULT = "KPI"
 defaults = {
     "spreadsheet_id": GOOGLE_SHEET_ID_DEFAULT,
     "kpi_sheet_name": KPI_SHEET_DEFAULT,
-    "drive_root_id": "",           # URL/ID thư mục gốc của ĐƠN VỊ (nếu dùng Shared Drive)
+    "drive_root_id": "",           # URL/ID thư mục gốc của ĐƠN VỊ (khuyên dùng Shared Drive)
     "_selected_idx": None,
     "_csv_loaded_sig": "",
     "auto_save_drive": False,      # thử nghiệm nên mặc định tắt tự lưu Drive
@@ -189,105 +191,270 @@ def to_percent(val):
     return v * 100.0 if abs(v) <= 1.0 else v
 
 
-# ---------- QUY TẮC ĐIỂM TRỪ DỰ BÁO ----------
-def is_penalty_forecast_kpi(row) -> bool:
-    name = (row.get("Tên chỉ tiêu (KPI)") or "").strip().lower()
-    method = (row.get("Phương pháp đo kết quả") or "").strip().lower()
-    if "dự báo tổng thương phẩm" in name:
-        return True
-    if ("sai số" in method or "sai so" in method) and ("trừ" in method or "tru" in method):
-        return True
-    return False
+# ===================== RULE ENGINE FOR KPI SCORING =====================
+import math, ast
 
+_RULES_CACHE = None  # cache đọc từ sheet RULES
 
-def parse_penalty_step(method_text: str, default_step=0.04) -> float:
-    if not method_text:
-        return default_step
-    t = method_text.lower()
-    if re.search(r"0[,\.]0?4", t):
-        return 0.04
-    if re.search(r"0[,\.]0?2", t):
-        return 0.02
-    return default_step
+# Luật mặc định nếu không có sheet RULES
+_RULES_DEFAULT = [
+    {
+        "Code":"PENALTY_ERR_004", "Type":"PENALTY_ERR",
+        "thr":1.5, "step":0.1, "pen":0.04, "cap":3.0,
+        "keywords":"dự báo tổng thương phẩm; sai số ±1,5%; tru 0,04; trừ 0,04"
+    },
+    {
+        "Code":"PENALTY_ERR_002", "Type":"PENALTY_ERR",
+        "thr":1.5, "step":0.1, "pen":0.02, "cap":3.0,
+        "keywords":"sai số ±1,5%; tru 0,02; trừ 0,02"
+    },
+    {"Code":"RATIO_UP",   "Type":"RATIO_UP",   "keywords":"tăng tốt hơn; >=; increase; higher"},
+    {"Code":"RATIO_DOWN", "Type":"RATIO_DOWN", "keywords":"giảm tốt hơn; <=; decrease; lower"},
+    {"Code":"PASS_FAIL",  "Type":"PASS_FAIL",  "keywords":"đạt/không đạt; dat/khong dat; pass/fail"},
+    {"Code":"RANGE",      "Type":"RANGE",      "keywords":"khoảng; range; trong khoảng"},
+    # Ví dụ EXPR:
+    # {"Code":"CUSTOM_EXPR_1", "Type":"EXPR", "expr":"round(min(ACTUAL/PLAN,2.0)*10*W,2)"}
+]
 
+def _to_float(x):
+    try: return float(x)
+    except: return None
 
-def kpi_penalty_error_method(actual_err_pct, threshold_pct=1.5, step_pct=0.1, per_step_penalty=0.04, max_penalty=3.0):
-    if actual_err_pct is None:
-        return 0.0, None
-    exceed = max(0.0, actual_err_pct - threshold_pct)
-    steps = int(exceed // step_pct)
-    penalty = min(max_penalty, steps * per_step_penalty)
-    return penalty, max(0.0, 10.0 - penalty)
+def _to_pct(x):
+    v = _to_float(x)
+    if v is None: return None
+    return v*100.0 if abs(v) <= 1.0 else v
 
+def _coerce_weight(w):
+    w = _to_float(w) or 0.0
+    return w/100.0 if w>1 else max(w,0.0)
 
-def compute_score_generic(plan, actual, weight):
-    if plan in (None, 0) or actual is None:
+def _safe_eval_expr(expr, env):
+    """Đánh giá EXPR an toàn: chỉ cho phép số học + min/max/abs/round/math.*; biến PLAN, ACTUAL, W, LO, HI."""
+    allowed_names = {"min":min, "max":max, "abs":abs, "round":round, "math":math}
+    allowed_vars  = {k: (v if v is not None else 0.0) for k,v in env.items()}
+    code = ast.parse(expr, mode="eval")
+    for node in ast.walk(code):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                if node.func.id not in allowed_names:
+                    raise ValueError(f"Func not allowed: {node.func.id}")
+            elif isinstance(node.func, ast.Attribute):
+                if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "math"):
+                    raise ValueError("Only math.* allowed")
+        elif not isinstance(node, (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Name, ast.Load,
+                                   ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv,
+                                   ast.USub, ast.UAdd, ast.Call, ast.Attribute, ast.Constant, ast.Compare,
+                                   ast.Gt, ast.Lt, ast.GtE, ast.LtE, ast.Eq, ast.NotEq, ast.BoolOp,
+                                   ast.And, ast.Or, ast.IfExp)):
+            raise ValueError("Unsafe expression")
+    return eval(compile(code, "<expr>", "eval"), {"__builtins__":{}, **allowed_names}, allowed_vars)
+
+def load_rules_registry():
+    """Cố gắng đọc sheet 'RULES' (cùng spreadsheet). Nếu không có → dùng mặc định."""
+    global _RULES_CACHE
+    if _RULES_CACHE is not None:
+        return _RULES_CACHE
+    try:
+        sh = open_spreadsheet(st.session_state.get("spreadsheet_id",""))
+        try:
+            ws = sh.worksheet("RULES")
+            recs = ws.get_all_records(expected_headers=ws.row_values(1))
+            rules = []
+            for r in recs:
+                rule = {k.strip(): v for k,v in r.items()}
+                rule["Code"] = str(rule.get("Code") or "").strip()
+                rule["Type"] = str(rule.get("Type") or "").strip().upper()
+                for k in ("thr","step","pen","cap"):
+                    rule[k] = _to_float(rule.get(k)) if rule.get(k)!="" else None
+                rule["expr"] = str(rule.get("expr") or "").strip()
+                rule["keywords"] = str(rule.get("keywords") or "").lower()
+                if rule["Code"] and rule["Type"]:
+                    rules.append(rule)
+            if rules:
+                _RULES_CACHE = rules
+                return _RULES_CACHE
+        except Exception:
+            pass
+    except Exception:
+        pass
+    _RULES_CACHE = _RULES_DEFAULT
+    return _RULES_CACHE
+
+def _parse_overrides(txt):
+    """
+    Cho phép ghi trong 'Phương pháp đo kết quả':
+    [PENALTY_ERR] thr=1.5; step=0.1; pen=0.04; cap=3
+    hoặc [RANGE] lo=..., hi=...
+    """
+    code, overrides = None, {}
+    m = re.search(r"\[([A-Za-z0-9_]+)\]", str(txt))
+    if m: code = m.group(1).strip().upper()
+    for k,v in re.findall(r"([A-Za-z_]+)\s*=\s*([0-9\.,-]+)", str(txt)):
+        k = k.strip().lower()
+        v = v.strip().replace(".","").replace(",",".")
+        overrides[k] = _to_float(v)
+    return code, overrides
+
+def _match_rule(method_text):
+    """Ưu tiên: mã trong [] → từ khóa → None."""
+    rules = load_rules_registry()
+    txt = (method_text or "").strip()
+    code, overrides = _parse_overrides(txt)
+    if code:
+        for r in rules:
+            if r.get("Code","").upper() == code:
+                return r, overrides
+    t = txt.lower()
+    for r in rules:
+        kw = r.get("keywords","")
+        if any(k.strip() and k.strip() in t for k in kw.split(";")):
+            return r, {}
+    return None, {}
+
+def _score_penalty_err(row, rule, overrides):
+    plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
+    actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
+    if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
+    if actual is None: actual = parse_float(row.get("Thực hiện"))
+
+    thr  = overrides.get("thr",  rule.get("thr", 1.5) )
+    step = overrides.get("step", rule.get("step",0.1) )
+    pen  = overrides.get("pen",  rule.get("pen", 0.04))
+    cap  = overrides.get("cap",  rule.get("cap", 3.0) )
+
+    unit = str(row.get("Đơn vị tính") or "").lower()
+    err_pct = None
+    if actual is not None:
+        if actual <= 5 or ("%" in unit and actual <= 100):
+            err_pct = to_percent(actual)
+        elif plan not in (None, 0):
+            err_pct = abs(actual - plan)/abs(plan)*100.0
+    exceed = max(0.0, (err_pct or 0.0) - (thr or 0.0))
+    steps  = int(exceed // (step or 0.1))
+    penalty = min(cap or 3.0, steps * (pen or 0.04))
+    return -round(penalty, 2)
+
+def _score_ratio_up(row):
+    plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
+    actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
+    if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
+    if actual is None: actual = parse_float(row.get("Thực hiện"))
+    w = _coerce_weight(row.get("Trọng số"))
+    if plan in (None,0) or actual is None: return None
+    return round(max(min(actual/plan, 2.0), 0.0)*10*w, 2)
+
+def _score_ratio_down(row):
+    plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
+    actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
+    if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
+    if actual is None: actual = parse_float(row.get("Thực hiện"))
+    w = _coerce_weight(row.get("Trọng số"))
+    if plan in (None,0) or actual is None: return None
+    ratio = 1.0 if actual <= plan else max(min(plan/actual, 2.0), 0.0)
+    return round(ratio*10*w, 2)
+
+def _score_pass_fail(row):
+    plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
+    actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
+    if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
+    if actual is None: actual = parse_float(row.get("Thực hiện"))
+    w = _coerce_weight(row.get("Trọng số"))
+    if plan is None or actual is None: return None
+    return round((10.0 if actual >= plan else 0.0)*w, 2)
+
+def _score_range(row, overrides):
+    lo = overrides.get("lo", parse_float(row.get("Ngưỡng dưới")))
+    hi = overrides.get("hi", parse_float(row.get("Ngưỡng trên")))
+    actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
+    if actual is None: actual = parse_float(row.get("Thực hiện"))
+    w = _coerce_weight(row.get("Trọng số"))
+    if lo is None or hi is None or actual is None: return None
+    return round((10.0 if (lo <= actual <= hi) else 0.0)*w, 2)
+
+def _score_expr(row, expr):
+    plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
+    actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
+    if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
+    if actual is None: actual = parse_float(row.get("Thực hiện"))
+    w = _coerce_weight(row.get("Trọng số"))
+    lo = parse_float(row.get("Ngưỡng dưới"))
+    hi = parse_float(row.get("Ngưỡng trên"))
+    try:
+        val = _safe_eval_expr(expr, {"PLAN":plan, "ACTUAL":actual, "W":w, "LO":lo, "HI":hi})
+        return None if val is None else float(val)
+    except Exception:
         return None
-    ratio = max(min(actual / plan, 2.0), 0.0)
-    w = weight / 100.0 if (weight and weight > 1) else (weight or 0.0)
-    return round(ratio * 10 * w, 2)
-
 
 def compute_score_with_method(row):
-    """DỰ BÁO → điểm KPI ÂM = -penalty (0→-3). Khác → điểm KPI theo trọng số."""
-    plan = parse_vn_number(st.session_state.get("plan_txt", "")) if "plan_txt" in st.session_state else None
-    actual = parse_vn_number(st.session_state.get("actual_txt", "")) if "actual_txt" in st.session_state else None
-    if plan is None:
-        plan = parse_float(row.get("Kế hoạch"))
-    if actual is None:
-        actual = parse_float(row.get("Thực hiện"))
+    """Chấm điểm dựa trên RULES. Nếu không khớp luật → fallback heuristic."""
+    method_text = str(row.get("Phương pháp đo kết quả") or "").strip()
+    rule, overrides = _match_rule(method_text)
 
+    if rule:
+        t = rule.get("Type","").upper()
+        if t == "PENALTY_ERR":
+            return _score_penalty_err(row, rule, overrides)
+        elif t == "RATIO_UP":
+            return _score_ratio_up(row)
+        elif t == "RATIO_DOWN":
+            return _score_ratio_down(row)
+        elif t == "PASS_FAIL":
+            return _score_pass_fail(row)
+        elif t == "RANGE":
+            return _score_range(row, overrides)
+        elif t == "EXPR" and rule.get("expr"):
+            return _score_expr(row, rule["expr"])
+
+    # ------- Fallback (giữ tương thích cũ) -------
+    plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
+    actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
+    if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
+    if actual is None: actual = parse_float(row.get("Thực hiện"))
     weight = parse_float(row.get("Trọng số")) or 0.0
-    method = str(row.get("Phương pháp đo kết quả") or "").strip()
-    method_l = method.lower()
+    method_l = method_text.lower()
 
-    # --- DỰ BÁO: điểm trừ (âm) ---
-    if is_penalty_forecast_kpi(row):
-        unit = str(row.get("Đơn vị tính") or "").lower()
-        actual_err_pct = None
-        if actual is not None:
-            if actual <= 5 or ("%" in unit and actual <= 100):
-                actual_err_pct = to_percent(actual)
-            elif plan not in (None, 0):
-                actual_err_pct = abs(actual - plan) / abs(plan) * 100.0
-        threshold = 1.5
+    if "dự báo tổng thương phẩm" in (row.get("Tên chỉ tiêu (KPI)") or "").lower() \
+       or (("sai số" in method_l or "sai so" in method_l) and ("trừ" in method_l or "tru" in method_l)):
+        pen = 0.04 if re.search(r"0[,\.]0?4", method_l) else (0.02 if re.search(r"0[,\.]0?2", method_l) else 0.04)
+        thr = 1.5
         m = re.search(r"(\d+)[\.,](\d+)", method_l)
         if m:
-            try:
-                threshold = float(m.group(1) + "." + m.group(2))
-            except Exception:
-                threshold = 1.5
-        else:
-            thr = parse_float(row.get("Ngưỡng trên"))
-            if thr is not None:
-                threshold = thr
-        per_step = parse_penalty_step(method_l, default_step=0.04)
-        penalty, _ = kpi_penalty_error_method(actual_err_pct, threshold, 0.1, per_step, 3.0)
+            try: thr = float(m.group(1)+"."+m.group(2))
+            except: pass
+        unit = str(row.get("Đơn vị tính") or "").lower()
+        err_pct = None
+        if actual is not None:
+            if actual <= 5 or ("%" in unit and actual <= 100):
+                err_pct = to_percent(actual)
+            elif plan not in (None,0):
+                err_pct = abs(actual - plan)/abs(plan)*100.0
+        exceed = max(0.0, (err_pct or 0.0) - thr)
+        steps  = int(exceed // 0.1)
+        penalty = min(3.0, steps * pen)
         return -round(penalty, 2)
 
-    # --- CÁC PHƯƠNG PHÁP KHÁC ---
-    if plan in (None, 0) or actual is None:
-        return None
-    w = weight / 100.0 if (weight and weight > 1) else (weight or 0.0)
+    if plan in (None, 0) or actual is None: return None
+    w = weight/100.0 if (weight and weight > 1) else (weight or 0.0)
     if any(k in method_l for k in ["tăng", ">=", "cao hơn tốt", "increase", "higher"]):
-        return round(max(min(actual / plan, 2.0), 0.0) * 10 * w, 2)
+        return round(max(min(actual/plan, 2.0), 0.0) * 10 * w, 2)
     if any(k in method_l for k in ["giảm", "<=", "thấp hơn tốt", "decrease", "lower"]):
-        ratio = 1.0 if actual <= plan else max(min(plan / actual, 2.0), 0.0)
+        ratio = 1.0 if actual <= plan else max(min(plan/actual, 2.0), 0.0)
         return round(ratio * 10 * w, 2)
     if any(k in method_l for k in ["đạt", "dat", "bool", "pass/fail"]):
         return round((10.0 if actual >= plan else 0.0) * w, 2)
     if any(k in method_l for k in ["khoảng", "range", "trong khoảng"]):
-        lo = parse_float(row.get("Ngưỡng dưới"))
-        hi = parse_float(row.get("Ngưỡng trên"))
+        lo = parse_float(row.get("Ngưỡng dưới")); hi = parse_float(row.get("Ngưỡng trên"))
         if lo is None or hi is None:
-            return round(max(min(actual / plan, 2.0), 0.0) * 10 * w, 2)
+            return round(max(min(actual/plan, 2.0), 0.0) * 10 * w, 2)
         return round((10.0 if (lo <= actual <= hi) else 0.0) * w, 2)
-    return compute_score_generic(plan, actual, weight)
+    ratio = max(min(actual/plan, 2.0), 0.0)
+    return round(ratio * 10 * w, 2)
+# =================== END RULE ENGINE ===================
 
 
 # ------------------- ÉP KIỂU SỐ -------------------
 NUMERIC_COLS = ["Kế hoạch", "Thực hiện", "Trọng số", "Ngưỡng dưới", "Ngưỡng trên", "Điểm KPI"]
-
 
 def coerce_numeric_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -354,13 +521,11 @@ def get_drive_service():
         return None
     return gbuild("drive", "v3", credentials=creds)
 
-
 def ensure_parent_ok(service, parent_id: str):
     try:
         service.files().get(fileId=parent_id, fields="id,name").execute()
     except HttpError as e:
         raise RuntimeError(f"Không truy cập được thư mục gốc (ID: {parent_id}).") from e
-
 
 def ensure_folder(service, parent_id: str, name: str) -> str:
     ensure_parent_ok(service, parent_id)
@@ -377,13 +542,11 @@ def ensure_folder(service, parent_id: str, name: str) -> str:
     folder = service.files().create(body=meta, fields="id", supportsAllDrives=True).execute()
     return folder["id"]
 
-
 def upload_new(service, parent_id: str, filename: str, data: bytes, mime: str) -> str:
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
     meta = {"name": filename, "parents": [parent_id]}
     f = service.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
     return f["id"]
-
 
 def list_files_in_folder(service, parent_id: str):
     q = f"'{parent_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"
@@ -401,10 +564,8 @@ def list_files_in_folder(service, parent_id: str):
     )
     return res.get("files", [])
 
-
 def save_report_to_drive(excel_bytes: bytes, x_ext: str, x_mime: str, pdf_bytes: bytes | None):
-    """Lưu trực tiếp vào ROOT của ĐƠN VỊ:
-       <Root của đơn vị> / Báo cáo KPI / YYYY-MM / KPI_YYYY-MM-DD_HHMM.<xlsx|csv> (+ PDF)"""
+    """Lưu vào <Root đơn vị>/Báo cáo KPI/YYYY-MM/KPI_YYYY-MM-DD_HHMM.*"""
     service = get_drive_service()
     if service is None:
         st.warning("Chưa cài google-api-python-client nên không thể lưu Drive.")
@@ -439,7 +600,7 @@ def save_report_to_drive(excel_bytes: bytes, x_ext: str, x_mime: str, pdf_bytes:
 
 # ------------------- XUẤT EXCEL/PDF -------------------
 def df_to_report_bytes(df: pd.DataFrame):
-    """Trả về (bytes, ext, mime). Ưu tiên XLSX; nếu không có engine thì fallback CSV."""
+    """Trả về (bytes, ext, mime). Ưu tiên XLSX; fallback CSV."""
     # openpyxl
     try:
         buf = io.BytesIO()
@@ -455,10 +616,8 @@ def df_to_report_bytes(df: pd.DataFrame):
             df.to_excel(writer, index=False, sheet_name="KPI")
         return buf.getvalue(), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except Exception:
-        # CSV fallback
         data = df.to_csv(index=False).encode("utf-8")
         return data, "csv", "text/csv"
-
 
 def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI") -> bytes:
     try:
@@ -469,24 +628,18 @@ def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI") -> bytes:
         from reportlab.lib.styles import getSampleStyleSheet
 
         buf = io.BytesIO()
-        doc = SimpleDocTemplate(
-            buf, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20
-        )
+        doc = SimpleDocTemplate(buf, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
         styles = getSampleStyleSheet()
         story = [Paragraph(title, styles["Title"]), Spacer(1, 0.3 * cm)]
         cols = list(df.columns)
         data = [cols] + df.fillna("").astype(str).values.tolist()
         t = Table(data, repeatRows=1)
-        t.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
-                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ]
-            )
-        )
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ]))
         story.append(t)
         doc.build(story)
         return buf.getvalue()
@@ -523,6 +676,12 @@ with st.sidebar:
         )
         st.checkbox("Tự động lưu Drive khi Ghi/Xuất", key="auto_save_drive")
 
+        # Nút nạp lại RULES (xoá cache)
+        if st.button("🔄 Nạp lại RULES", use_container_width=True):
+            globals()['_RULES_CACHE'] = None
+            st.success("Đã nạp lại bảng RULES.")
+            st.rerun()
+
         if st.button("🔎 Liệt kê tháng này (trong 'Báo cáo KPI/ YYYY-MM')", use_container_width=True):
             service = get_drive_service()
             if service is None:
@@ -542,21 +701,14 @@ with st.sidebar:
                             st.info(f"Chưa thấy file nào trong: Báo cáo KPI/{month_name}")
                         else:
                             st.success(f"Tìm thấy {len(files)} file trong tháng {month_name}:")
-                            st.dataframe(
-                                pd.DataFrame(
-                                    [
-                                        {
-                                            "Tên tệp": f["name"],
-                                            "MIME": f.get("mimeType", ""),
-                                            "Kích thước": f.get("size", ""),
-                                            "Tạo lúc": f.get("createdTime", ""),
-                                            "Sửa lúc": f.get("modifiedTime", ""),
-                                            "ID": f["id"],
-                                        }
-                                        for f in files
-                                    ]
-                                )
-                            )
+                            st.dataframe(pd.DataFrame([{
+                                "Tên tệp": f["name"],
+                                "MIME": f.get("mimeType", ""),
+                                "Kích thước": f.get("size", ""),
+                                "Tạo lúc": f.get("createdTime", ""),
+                                "Sửa lúc": f.get("modifiedTime", ""),
+                                "ID": f["id"],
+                            } for f in files]))
                     except Exception as e:
                         st.error(f"Lỗi liệt kê: {e}")
 
@@ -575,7 +727,7 @@ def _img64(path: Path):
         pass
     return None
 
-# Đặt logo tại assets/logo.png (tuỳ anh đổi đường dẫn)
+# Đặt logo tại assets/logo.png (nếu không có sẽ dùng fallback)
 LOGO_PATH = Path("assets/logo.png")
 logo64 = _img64(LOGO_PATH)
 
@@ -657,13 +809,11 @@ KPI_COLS = [
     "Tên đơn vị",
 ]
 
-
 def get_sheet_and_name():
     sid_cfg = st.session_state.get("spreadsheet_id", "") or GOOGLE_SHEET_ID_DEFAULT
     sheet_name = st.session_state.get("kpi_sheet_name") or KPI_SHEET_DEFAULT
     sh = open_spreadsheet(sid_cfg)
     return sh, sheet_name
-
 
 def write_kpi_to_sheet(sh, sheet_name: str, df: pd.DataFrame) -> bool:
     df = normalize_columns(df.copy())
@@ -725,20 +875,17 @@ if "actual_txt" not in st.session_state:
 st.subheader("✍️ Biểu mẫu nhập tay")
 f = st.session_state["_csv_form"]
 
-
 def _on_change_plan():
     val = parse_vn_number(st.session_state["plan_txt"])
     if val is not None:
         st.session_state["_csv_form"]["Kế hoạch"] = val
     st.session_state["plan_txt"] = format_vn_number(st.session_state["_csv_form"]["Kế hoạch"] or 0, 2)
 
-
 def _on_change_actual():
     val = parse_vn_number(st.session_state["actual_txt"])
     if val is not None:
         st.session_state["_csv_form"]["Thực hiện"] = val
     st.session_state["actual_txt"] = format_vn_number(st.session_state["_csv_form"]["Thực hiện"] or 0, 2)
-
 
 c0 = st.columns([2, 1, 1, 1])
 with c0[0]:
@@ -770,13 +917,14 @@ with c2[0]:
     ]
     cur = f.get("Phương pháp đo kết quả", "Tăng tốt hơn")
     f["Phương pháp đo kết quả"] = st.selectbox(
-        "Phương pháp đo kết quả", options=options_methods, index=options_methods.index(cur) if cur in options_methods else 0
+        "Phương pháp đo kết quả",
+        options=options_methods,
+        index=options_methods.index(cur) if cur in options_methods else 0
     )
-
 with c2[1]:
     tmp_row = {k: f.get(k) for k in f.keys()}
     tmp_row["Điểm KPI"] = compute_score_with_method(tmp_row)
-    label_metric = "Điểm trừ (tự tính)" if is_penalty_forecast_kpi(tmp_row) else "Điểm KPI (tự tính)"
+    label_metric = "Điểm trừ (tự tính)" if (tmp_row["Điểm KPI"] is not None and tmp_row["Điểm KPI"] < 0) else "Điểm KPI (tự tính)"
     st.metric(label_metric, tmp_row["Điểm KPI"] if tmp_row["Điểm KPI"] is not None else "—")
 with c2[2]:
     f["Ghi chú"] = st.text_input("Ghi chú", value=f["Ghi chú"])
@@ -794,7 +942,7 @@ with c4[0]:
 with c4[1]:
     f["Năm"] = st.text_input("Năm", value=str(f["Năm"]))
 
-# Nút "Áp dụng vào bảng CSV tạm" đứng riêng
+# Nút "Áp dụng vào bảng CSV tạm" (đứng riêng)
 apply_clicked = st.button("Áp dụng vào bảng CSV tạm", type="primary")
 
 # ------------------- HÀNG 4 NÚT MỖI NÚT 1 MÀU (ổn định bằng anchor riêng) -------------------
