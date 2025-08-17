@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.16, UI tuned)
-- Header có logo tròn + tiêu đề gradient
-- Tô màu 4 nút hành động: Ghi CSV / Làm mới / Xuất báo cáo / Lưu Drive
-- Vẫn giữ toàn bộ logic: đăng nhập, đọc/ghi Google Sheets, xuất Excel/PDF,
-  (tuỳ chọn) lưu Google Drive (Shared Drive khuyến nghị)
+KPI App – Định Hóa (v3.17, UI fix)
+- Header có logo tròn + Fallback logo nếu chưa có file (hiển thị "KPI" trong vòng tròn gradient)
+- 4 nút hành động mỗi nút 1 màu (ổn định bằng anchor riêng từng nút, không phụ thuộc DOM thứ tự)
+- Giữ logic: đăng nhập, đọc/ghi Google Sheets, xuất Excel/PDF, (tuỳ chọn) lưu Google Drive
 """
 
 import re
 import io
 import base64
-import os
 from pathlib import Path
 from datetime import datetime
 
@@ -33,8 +31,6 @@ except Exception:
 # ------------------- CẤU HÌNH -------------------
 st.set_page_config(page_title="KPI – Định Hóa", layout="wide")
 
-APP_TITLE = "📊 KPI – Đội quản lý Điện lực khu vực Định Hóa"
-
 # (Ví dụ) ID Google Sheet chứa dữ liệu KPI/USE (anh thay bằng sheet thật của anh)
 GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"
 KPI_SHEET_DEFAULT = "KPI"
@@ -42,7 +38,7 @@ KPI_SHEET_DEFAULT = "KPI"
 defaults = {
     "spreadsheet_id": GOOGLE_SHEET_ID_DEFAULT,
     "kpi_sheet_name": KPI_SHEET_DEFAULT,
-    "drive_root_id": "",           # URL/ID thư mục gốc của ĐƠN VỊ (trong Shared Drive để có quota)
+    "drive_root_id": "",           # URL/ID thư mục gốc của ĐƠN VỊ (nếu dùng Shared Drive)
     "_selected_idx": None,
     "_csv_loaded_sig": "",
     "auto_save_drive": False,      # thử nghiệm nên mặc định tắt tự lưu Drive
@@ -579,7 +575,6 @@ def _img64(path: Path):
         pass
     return None
 
-
 # Đặt logo tại assets/logo.png (tuỳ anh đổi đường dẫn)
 LOGO_PATH = Path("assets/logo.png")
 logo64 = _img64(LOGO_PATH)
@@ -589,10 +584,15 @@ header_html = f"""
 .app-header {{
   display:flex; align-items:center; gap:14px; margin: 6px 0 10px;
 }}
-.app-logo {{
+.app-logo, .app-logo-fb {{
   width:56px; height:56px; border-radius:50%;
   box-shadow:0 0 0 3px #fff, 0 0 0 6px #ff4b4b20;
-  object-fit:cover;
+  display:flex; align-items:center; justify-content:center;
+  font-weight:800; color:white; user-select:none;
+}}
+.app-logo-fb {{
+  background: radial-gradient(circle at 30% 30%, #0ea5e9, #8b5cf6);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
 }}
 .app-title {{
   margin:0; line-height:1.05; font-size:34px; font-weight:800;
@@ -603,9 +603,28 @@ header_html = f"""
 .app-sub {{
   margin:0; color:#64748b; font-size:14px;
 }}
+/* Màu cho 4 nút: dùng anchor riêng từng nút để ổn định */
+div.btn-save + div.stButton button {{
+  background:#22c55e !important; color:white !important; border-color:#22c55e !important;
+}}
+div.btn-refresh + div.stButton button {{
+  background:#f59e0b !important; color:black !important; border-color:#f59e0b !important;
+}}
+div.btn-export + div.stButton button {{
+  background:#3b82f6 !important; color:white !important; border-color:#3b82f6 !important;
+}}
+div.btn-drive + div.stButton button {{
+  background:#8b5cf6 !important; color:white !important; border-color:#8b5cf6 !important;
+}}
+div.btn-save + div.stButton button:hover,
+div.btn-refresh + div.stButton button:hover,
+div.btn-export + div.stButton button:hover,
+div.btn-drive + div.stButton button:hover {{
+  opacity:.95; transform: translateY(-1px);
+}}
 </style>
 <div class="app-header">
-  {"<img class='app-logo' src='data:image/png;base64,"+logo64+"'/>" if logo64 else ""}
+  {("<img class='app-logo' src='data:image/png;base64,"+logo64+"'/>") if logo64 else "<div class='app-logo-fb'>KPI</div>"}
   <div>
     <h1 class="app-title">KPI – Đội quản lý Điện lực khu vực Định Hóa</h1>
     <p class="app-sub">Biểu mẫu nhập &amp; báo cáo KPI</p>
@@ -614,7 +633,7 @@ header_html = f"""
 """
 st.markdown(header_html, unsafe_allow_html=True)
 
-# (Không dùng st.title(APP_TITLE) nữa để tránh lặp)
+# Nếu chưa đăng nhập thì dừng
 if "_user" not in st.session_state:
     st.info("Vui lòng đăng nhập để làm việc.")
     st.stop()
@@ -775,43 +794,22 @@ with c4[0]:
 with c4[1]:
     f["Năm"] = st.text_input("Năm", value=str(f["Năm"]))
 
-# Nút "Áp dụng vào bảng CSV tạm" đứng riêng (không tô màu)
+# Nút "Áp dụng vào bảng CSV tạm" đứng riêng
 apply_clicked = st.button("Áp dụng vào bảng CSV tạm", type="primary")
 
-# ====== CSS tô màu 4 nút hành động ngay sau mỏ neo #actions ======
-st.markdown(
-    """
-<style>
-#actions + div[data-testid="stHorizontalBlock"] > div:nth-child(1) button {
-  background:#22c55e !important; color:white !important; border-color:#22c55e !important;
-}
-#actions + div[data-testid="stHorizontalBlock"] > div:nth-child(2) button {
-  background:#f59e0b !important; color:black !important; border-color:#f59e0b !important;
-}
-#actions + div[data-testid="stHorizontalBlock"] > div:nth-child(3) button {
-  background:#3b82f6 !important; color:white !important; border-color:#3b82f6 !important;
-}
-#actions + div[data-testid="stHorizontalBlock"] > div:nth-child(4) button {
-  background:#8b5cf6 !important; color:white !important; border-color:#8b5cf6 !important;
-}
-#actions + div[data-testid="stHorizontalBlock"] button:hover {
-  opacity:.95; transform: translateY(-1px);
-}
-</style>
-<div id="actions"></div>
-""",
-    unsafe_allow_html=True,
-)
-
-# Hàng 4 nút được tô màu theo thứ tự 1→4
+# ------------------- HÀNG 4 NÚT MỖI NÚT 1 MÀU (ổn định bằng anchor riêng) -------------------
 b1, b2, b3, b4 = st.columns([1, 1, 1, 2])
 with b1:
+    st.markdown('<div class="btn-save"></div>', unsafe_allow_html=True)
     save_csv_clicked = st.button("💾 Ghi CSV tạm vào sheet KPI", use_container_width=True)
 with b2:
+    st.markdown('<div class="btn-refresh"></div>', unsafe_allow_html=True)
     refresh_clicked = st.button("🔁 Làm mới bảng CSV", use_container_width=True)
 with b3:
+    st.markdown('<div class="btn-export"></div>', unsafe_allow_html=True)
     export_clicked = st.button("📤 Xuất báo cáo (Excel/PDF)", use_container_width=True)
 with b4:
+    st.markdown('<div class="btn-drive"></div>', unsafe_allow_html=True)
     save_drive_clicked = st.button("☁️ Lưu dữ liệu vào Google Drive (thủ công)", use_container_width=True)
 
 # ------------------- CSV DƯỚI -------------------
