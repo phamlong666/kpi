@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # KPI – Đội quản lý Điện lực khu vực Định Hóa
 # Bản cập nhật:
-# - Tự nạp form khi tick "Chọn" (không cần nút Nạp dòng)
+# - Tự nạp form khi tick "Chọn" (có rerun tức thì để hiển thị ngay)
 # - "📥 Nhập CSV vào KPI" đặt dưới vùng nhập liệu (form luôn ở trên)
-# - Ô "Phương pháp đo kết quả" có combo chọn rule (tự điền [CODE])
+# - Ô "Phương pháp đo kết quả" có combo chọn RULES → tự điền [CODE]
 # - Login bắt buộc, form sticky, 4 nút 4 màu, ghi Google Sheet, xuất Excel
 
 import re, io, json, math
@@ -97,13 +97,12 @@ def _open_spreadsheet():
 @st.cache_data(ttl=600)
 def load_rules():
     reg={
+        "PASS_FAIL_DEFAULT":{"Type":"PASS_FAIL","Label":"Đạt / Không đạt"},
         "RATIO_UP_DEFAULT":{"Type":"RATIO_UP","Label":"Tăng – đạt/vượt kế hoạch"},
         "RATIO_DOWN_DEFAULT":{"Type":"RATIO_DOWN","Label":"Giảm – càng thấp càng tốt"},
-        "PASS_FAIL_DEFAULT":{"Type":"PASS_FAIL","Label":"Đạt / Không đạt"},
         "PENALTY_ERR_004":{"Type":"PENALTY_ERR","thr":1.5,"step":0.1,"pen":0.04,"cap":3,"apply_weight":"false","Label":"Dự báo sai số ±1.5%, trừ 0.04/0.1% (max 3đ)"},
         "MANUAL_POINT":{"Type":"MANUAL","apply_weight":"false","Label":"Nhập tay điểm KPI"},
     }
-    # load sheet RULES nếu có để thêm code khác vào combo
     try:
         sh=_open_spreadsheet()
         try: ws=sh.worksheet("RULES")
@@ -179,6 +178,7 @@ if "df" not in st.session_state: st.session_state.df=pd.DataFrame()
 if "logged_in" not in st.session_state: st.session_state.logged_in=False
 if "last_selected_index" not in st.session_state: st.session_state.last_selected_index=None
 if "method_selected_code" not in st.session_state: st.session_state.method_selected_code="PASS_FAIL_DEFAULT"
+if "_pending_sync" not in st.session_state: st.session_state._pending_sync=False
 
 # ================== SIDEBAR (LOGIN + SHEETS) ==================
 with st.sidebar:
@@ -207,18 +207,9 @@ if not st.session_state.logged_in:
     st.warning("Vui lòng đăng nhập để bắt đầu làm việc.")
     st.stop()
 
-# ================== AUTO-LOAD FORM TỪ SELECTION ==================
-def sync_form_from_selection():
-    """Nếu có đúng 1 dòng 'Chọn'==True và index khác lần trước → cập nhật form trước khi render widget."""
-    if st.session_state.df.empty or "Chọn" not in st.session_state.df.columns:
-        return
+# ================== AUTO-SYNC TRƯỚC KHI VẼ FORM ==================
+def _sync_form_from_selected_index(idx):
     df = st.session_state.df
-    sel = df.index[df["Chọn"]==True].tolist()
-    if len(sel)!=1:
-        return
-    idx = sel[0]
-    if st.session_state.last_selected_index == idx:
-        return
     r = df.loc[idx]
     st.session_state.form_kpi_name = str(r.get("Tên chỉ tiêu (KPI)") or r.get("Tên chỉ tiêu") or "")
     st.session_state.unit_txt      = str(r.get("Đơn vị tính") or "")
@@ -231,14 +222,17 @@ def sync_form_from_selection():
     st.session_state.month_txt     = str(r.get("Tháng") or "")
     st.session_state.year_txt      = str(r.get("Năm") or str(datetime.now().year))
     st.session_state.note_txt      = str(r.get("Ghi chú") or "")
-    # nếu method có [CODE], đặt combo theo code; nếu không, giữ mặc định
+    # cập nhật combo theo [CODE] nếu có
     m = re.search(r"\[([A-Za-z0-9_]+)\]", st.session_state.method_txt)
-    if m:
-        st.session_state.method_selected_code = m.group(1).upper()
-    st.session_state.last_selected_index = idx
+    if m: st.session_state.method_selected_code = m.group(1).upper()
 
-# gọi trước khi render form
-sync_form_from_selection()
+# Nếu có flag pending từ lần tick trước, đồng bộ rồi xóa flag (trước khi tạo widget)
+if st.session_state._pending_sync and not st.session_state.df.empty and "Chọn" in st.session_state.df.columns:
+    sel = st.session_state.df.index[st.session_state.df["Chọn"]==True].tolist()
+    if len(sel)==1:
+        st.session_state.last_selected_index = sel[0]
+        _sync_form_from_selected_index(sel[0])
+    st.session_state._pending_sync = False
 
 # ================== VÙNG NHẬP LIỆU (STICKY – LUÔN Ở TRÊN) ==================
 with st.container():
@@ -255,24 +249,20 @@ with st.container():
     with r2[1]: actual = st.text_input("Thực hiện", key="actual_txt", value=st.session_state.get("actual_txt","0,00"))
     with r2[2]: weight = st.text_input("Trọng số (%)", key="weight_txt", value=st.session_state.get("weight_txt","100"))
 
-    # Combo CHỌN PHƯƠNG PHÁP → tự điền [CODE] vào ô bên dưới
+    # Combo chọn RULES → tự gán [CODE] vào ô phương pháp
     rules = load_rules()
-    options = []
-    default_code = st.session_state.get("method_selected_code","PASS_FAIL_DEFAULT")
-    # Ưu tiên 5 code chính
     preferred = ["PASS_FAIL_DEFAULT","RATIO_UP_DEFAULT","RATIO_DOWN_DEFAULT","PENALTY_ERR_004","MANUAL_POINT"]
+    options = []
     for c in preferred + [c for c in rules.keys() if c not in preferred]:
         label = rules.get(c,{}).get("Label") or c
         options.append((f"{label}  [{c}]", c))
-    labels = [o[0] for o in options]
-    codes  = [o[1] for o in options]
-    try:
-        idx = codes.index(default_code)
-    except ValueError:
-        idx = 0
+    labels = [o[0] for o in options]; codes = [o[1] for o in options]
+    default_code = st.session_state.get("method_selected_code","PASS_FAIL_DEFAULT")
+    try: idx = codes.index(default_code)
+    except ValueError: idx = 0
     selected_label = st.selectbox("Chọn phương pháp", labels, index=idx, key="method_select_box")
     selected_code  = codes[labels.index(selected_label)]
-    # Nếu chọn code khác với hiện tại → cập nhật method_txt trước khi render widget text_input
+    # cập nhật method_txt nếu khác
     if f"[{selected_code}]" not in (st.session_state.get("method_txt") or ""):
         st.session_state.method_txt = f"[{selected_code}]"
 
@@ -285,6 +275,17 @@ with st.container():
     with r3[2]: note  = st.text_input("Ghi chú", key="note_txt", value=st.session_state.get("note_txt",""))
 
     # Xem trước điểm
+    def compute_score(row):
+        mth=str(row.get("Phương pháp đo kết quả") or "")
+        m=re.search(r"\[([A-Za-z0-9_]+)\]",mth)
+        code=m.group(1).upper() if m else ""
+        if   code=="PENALTY_ERR_004": return _score_penalty_err(row)
+        elif code=="MANUAL_POINT":    return _score_manual(row)
+        ml=mth.lower()
+        if "đạt/không đạt" in ml: return _score_pass_fail(row)
+        if "≤" in ml or "<=" in ml or "giảm tốt hơn" in ml: return _score_ratio_down(row)
+        return _score_ratio_up(row)
+
     preview = compute_score({"Phương pháp đo kết quả":method,"Kế hoạch":plan,"Thực hiện":actual,"Trọng số":weight,"Ghi chú":note})
     st.markdown(f"<div class='total-box'>Điểm xem trước: <b>{'—' if preview is None else preview}</b></div>", unsafe_allow_html=True)
 
@@ -313,12 +314,18 @@ with st.container():
 st.subheader("📋 Bảng KPI (CSV tạm)")
 if not st.session_state.df.empty:
     df = st.session_state.df.copy()
+
     # Tính lại điểm
+    def compute_score_for_df_row(r):
+        return compute_score({"Phương pháp đo kết quả":r.get("Phương pháp đo kết quả"),
+                              "Kế hoạch":r.get("Kế hoạch"),"Thực hiện":r.get("Thực hiện"),
+                              "Trọng số":r.get("Trọng số"),"Ghi chú":r.get("Ghi chú")})
     new_scores=[]
     for _, r in df.iterrows():
-        s=compute_score(r)
+        s=compute_score_for_df_row(r)
         new_scores.append(s if s is not None else r.get("Điểm KPI"))
     df["Điểm KPI"]=new_scores
+
     # Tổng điểm
     total=0.0
     for v in df["Điểm KPI"].tolist():
@@ -326,22 +333,37 @@ if not st.session_state.df.empty:
         if vv is not None: total+=vv
     st.markdown(f"<div class='total-box'>Tổng điểm KPI (tạm tính): <b>{_fmt_vn(total,2)}</b></div>", unsafe_allow_html=True)
 
+    # Hiển thị editor (tick -> sau đây ta phát hiện và rerun)
     edited = st.data_editor(
         df,
         use_container_width=True,
         height=460,
         num_rows="dynamic",
         column_config={"Chọn": st.column_config.CheckboxColumn("Chọn", help="Tích để nạp form tự động")},
-        disabled=[],  # cho phép tick chọn
+        disabled=[],  # cho phép tick
         key="kpi_editor"
     )
-    # cập nhật df sau editor
+    # Cập nhật df vào state
     st.session_state.df = edited
+
+    # >>> PHÁT HIỆN THAY ĐỔI SELECTION & RERUN NGAY <<<
+    try:
+        sel = edited.index[edited["Chọn"]==True].tolist()
+    except Exception:
+        sel = []
+    # Chỉ auto khi đúng 1 dòng được tick
+    if len(sel)==1:
+        if st.session_state.get("last_selected_index") != sel[0]:
+            # đánh dấu pending sync & rerun để form được nạp TRƯỚC khi vẽ widget
+            st.session_state._pending_sync = True
+            # chọn index mới để sync ở lượt sau
+            # (không set form fields ở đây để tránh "cannot modify after widget instantiated")
+            st.rerun()
 else:
     st.info("Chưa có dữ liệu – vui lòng tải CSV mẫu ở phần bên dưới.")
 
 # ================== ÁP DỤNG VÀO CSV ==================
-if apply_btn:
+if 'apply_btn' in locals() and apply_btn:
     if st.session_state.df.empty:
         st.warning("Chưa có bảng CSV.")
     else:
@@ -353,17 +375,17 @@ if apply_btn:
             if mask.sum()==0:
                 st.warning("Hãy tích chọn ít nhất 1 dòng.")
             else:
-                df.loc[mask,"Tên chỉ tiêu (KPI)"]=name
-                df.loc[mask,"Đơn vị tính"]=unit
-                df.loc[mask,"Bộ phận/người phụ trách"]=dept
-                df.loc[mask,"Tên đơn vị"]=owner
-                df.loc[mask,"Kế hoạch"]=plan
-                df.loc[mask,"Thực hiện"]=actual
-                df.loc[mask,"Trọng số"]=weight
-                df.loc[mask,"Phương pháp đo kết quả"]=method
-                df.loc[mask,"Tháng"]=month
-                df.loc[mask,"Năm"]=year
-                df.loc[mask,"Ghi chú"]=note
+                df.loc[mask,"Tên chỉ tiêu (KPI)"]=st.session_state.form_kpi_name
+                df.loc[mask,"Đơn vị tính"]=st.session_state.unit_txt
+                df.loc[mask,"Bộ phận/người phụ trách"]=st.session_state.dept_txt
+                df.loc[mask,"Tên đơn vị"]=st.session_state.owner_txt
+                df.loc[mask,"Kế hoạch"]=st.session_state.plan_txt
+                df.loc[mask,"Thực hiện"]=st.session_state.actual_txt
+                df.loc[mask,"Trọng số"]=st.session_state.weight_txt
+                df.loc[mask,"Phương pháp đo kết quả"]=st.session_state.method_txt
+                df.loc[mask,"Tháng"]=st.session_state.month_txt
+                df.loc[mask,"Năm"]=st.session_state.year_txt
+                df.loc[mask,"Ghi chú"]=st.session_state.note_txt
                 if preview is not None:
                     df.loc[mask,"Điểm KPI"]=preview
                 st.session_state.df=df
@@ -380,7 +402,7 @@ def _write_to_sheet(df_out: pd.DataFrame):
     ws.update([df_out.columns.tolist()]+df_out.fillna("").astype(str).values.tolist(), value_input_option="USER_ENTERED")
     return True
 
-if write_btn:
+if 'write_btn' in locals() and write_btn:
     if st.session_state.df.empty:
         st.warning("Không có dữ liệu để ghi.")
     else:
@@ -390,12 +412,13 @@ if write_btn:
         except Exception as e:
             st.error(f"Lỗi khi ghi Sheets: {e}")
 
-if refresh_btn:
+if 'refresh_btn' in locals() and refresh_btn:
     st.session_state.df=pd.DataFrame()
     st.session_state.last_selected_index=None
+    st.session_state._pending_sync=False
     st.success("Đã làm mới bảng CSV.")
 
-if export_btn:
+if 'export_btn' in locals() and export_btn:
     if st.session_state.df.empty:
         st.warning("Không có dữ liệu để xuất.")
     else:
@@ -424,6 +447,7 @@ if up is not None:
             if c not in df.columns: df[c]=""
         st.session_state.df=df
         st.session_state.last_selected_index=None
+        st.session_state._pending_sync=False
         st.success("Đã nạp CSV.")
     except Exception as e:
         st.error(f"Lỗi đọc CSV: {e}")
