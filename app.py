@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.21)
-- Logo từ GitHub (fallback assets/logo.png)
-- Tiêu đề nhỏ hơn (24px)
-- Biểu mẫu nhập GHIM CỐ ĐỊNH (sticky) khi cuộn
-- 4 nút tác vụ mỗi nút 1 màu (marker + adjacent-sibling CSS)
-- Giữ RULES engine & Drive/Export như trước
+KPI App – Định Hóa (v3.22)
+- Form GHIM CỨNG (sticky) trên cùng
+- Tiêu đề nhỏ hơn
+- 4 nút tác vụ mỗi nút 1 màu
+- Tổng điểm KPI (tạm tính)
 """
 
 import re, io, base64, math, ast
@@ -16,7 +15,7 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Google Drive API (tùy chọn)
+# Drive API (tùy chọn)
 try:
     from googleapiclient.discovery import build as gbuild
     from googleapiclient.http import MediaIoBaseUpload
@@ -64,12 +63,8 @@ def get_gs_clients():
     try:
         svc = dict(st.secrets["gdrive_service_account"])
         if "private_key" in svc:
-            svc["private_key"] = (
-                svc["private_key"]
-                .replace("\\r\\n", "\\n")
-                .replace("\\r", "\\n")
-                .replace("\\\\n", "\\n")
-            )
+            svc["private_key"] = (svc["private_key"]
+                .replace("\\r\\n", "\\n").replace("\\r", "\\n").replace("\\\\n", "\\n"))
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
@@ -154,26 +149,23 @@ def to_percent(val):
     if v is None: return None
     return v*100.0 if abs(v)<=1.0 else v
 
-# ===================== RULE ENGINE =====================
+# ===================== RULE ENGINE (tóm lược) =====================
 _RULES_CACHE = None
 _RULES_DEFAULT = [
     {"Code":"PENALTY_ERR_004","Type":"PENALTY_ERR","thr":1.5,"step":0.1,"pen":0.04,"cap":3.0,"keywords":"dự báo tổng thương phẩm; sai số ±1,5%; trừ 0,04; tru 0,04"},
     {"Code":"PENALTY_ERR_002","Type":"PENALTY_ERR","thr":1.5,"step":0.1,"pen":0.02,"cap":3.0,"keywords":"sai số ±1,5%; trừ 0,02; tru 0,02"},
-    {"Code":"PENALTY_FLAG_025","Type":"PENALTY_FLAG","pen":0.25,"keywords":"vượt chỉ tiêu; vuot chi tieu; 0,25; 0.25; saifi; saidi"},
-    {"Code":"RATIO_UP","Type":"RATIO_UP","keywords":"tăng tốt hơn; >=; increase; higher"},
-    {"Code":"RATIO_DOWN","Type":"RATIO_DOWN","keywords":"giảm tốt hơn; <=; decrease; lower"},
-    {"Code":"PASS_FAIL","Type":"PASS_FAIL","keywords":"đạt/không đạt; dat/khong dat; pass/fail"},
-    {"Code":"RANGE","Type":"RANGE","keywords":"khoảng; range; trong khoảng"},
+    {"Code":"PENALTY_FLAG_025","Type":"PENALTY_FLAG","pen":0.25,"keywords":"vượt chỉ tiêu; 0,25; saifi; saidi"},
+    {"Code":"RATIO_UP","Type":"RATIO_UP","keywords":"tăng tốt hơn; >="},
+    {"Code":"RATIO_DOWN","Type":"RATIO_DOWN","keywords":"giảm tốt hơn; <="},
+    {"Code":"PASS_FAIL","Type":"PASS_FAIL","keywords":"đạt/không đạt"},
+    {"Code":"RANGE","Type":"RANGE","keywords":"khoảng; range"},
 ]
-
 def _to_float(x): 
     try: return float(x)
     except: return None
-
 def _coerce_weight(w):
     w = _to_float(w) or 0.0
     return w/100.0 if w>1 else max(w,0.0)
-
 def _safe_eval_expr(expr, env):
     allowed_names = {"min":min,"max":max,"abs":abs,"round":round,"math":math}
     allowed_vars  = {k:(v if v is not None else 0.0) for k,v in env.items()}
@@ -191,7 +183,6 @@ def _safe_eval_expr(expr, env):
                                   ast.Gt,ast.Lt,ast.GtE,ast.LtE,ast.Eq,ast.NotEq,ast.BoolOp,ast.And,ast.Or,ast.IfExp)):
             raise ValueError("Unsafe")
     return eval(compile(code,"<expr>","eval"),{"__builtins__":{},**allowed_names},allowed_vars)
-
 def load_rules_registry():
     global _RULES_CACHE
     if _RULES_CACHE is not None: return _RULES_CACHE
@@ -222,27 +213,23 @@ def load_rules_registry():
         pass
     _RULES_CACHE = _RULES_DEFAULT
     return _RULES_CACHE
-
 def _parse_overrides(txt):
     code, overrides = None, {}
     m = re.search(r"\[([A-Za-z0-9_]+)\]", str(txt))
     if m: code = m.group(1).strip().upper()
     for k,v in re.findall(r"([A-Za-z_]+)\s*=\s*([0-9\.,-]+)", str(txt)):
-        k = k.strip().lower()
-        v = v.strip().replace(".","").replace(",",".")
+        k = k.strip().lower(); v = v.strip().replace(".","").replace(",",".")
         overrides[k] = _to_float(v) if k!="op" else v
     mop = re.search(r"op\s*=\s*(<=|>=)", str(txt))
     if mop: overrides["op"] = mop.group(1)
     return code, overrides
-
 def _match_rule(method_text, kpi_name=None):
     rules = load_rules_registry()
     txt = (method_text or "").strip()
     code, overrides = _parse_overrides(txt)
     if code:
         for r in rules:
-            if r.get("Code","").upper()==code:
-                return r, overrides
+            if r.get("Code","").upper()==code: return r, overrides
     t = txt.lower()
     for r in rules:
         kw = r.get("keywords","")
@@ -250,21 +237,15 @@ def _match_rule(method_text, kpi_name=None):
             return r, {}
     if kpi_name:
         name = str(kpi_name)
-        if "≤" in name or "<=" in name.lower():
-            return {"Code":"RATIO_DOWN_AUTO","Type":"RATIO_DOWN"}, {}
-        if "≥" in name or ">=" in name.lower():
-            return {"Code":"RATIO_UP_AUTO","Type":"RATIO_UP"}, {}
+        if "≤" in name or "<=" in name.lower(): return {"Code":"RATIO_DOWN_AUTO","Type":"RATIO_DOWN"}, {}
+        if "≥" in name or ">=" in name.lower(): return {"Code":"RATIO_UP_AUTO","Type":"RATIO_UP"}, {}
     return None, {}
-
 def _deduce_op_from_name(row):
     name = str(row.get("Tên chỉ tiêu (KPI)") or "")
     name_l = name.lower()
-    if "≤" in name or "<=" in name_l or "≤ kế hoạch" in name_l or "ke hoach" in name_l:
-        return "<="
-    if "≥" in name or ">=" in name_l:
-        return ">="
+    if "≤" in name or "<=" in name_l or "≤ kế hoạch" in name_l: return "<="
+    if "≥" in name or ">=" in name_l: return ">="
     return "<="
-
 def _score_penalty_err(row, rule, overrides):
     plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
     actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
@@ -285,7 +266,6 @@ def _score_penalty_err(row, rule, overrides):
     steps  = int(exceed // (step or 0.1))
     penalty = min(cap or 3.0, steps*(pen or 0.04))
     return -round(penalty,2)
-
 def _score_penalty_flag(row, rule, overrides):
     plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
     actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
@@ -296,7 +276,6 @@ def _score_penalty_flag(row, rule, overrides):
     if plan is None or actual is None: return None
     violated = (actual>plan) if op=="<=" else (actual<plan)
     return -float(pen) if violated else 0.0
-
 def _score_ratio_up(row):
     plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
     actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
@@ -305,7 +284,6 @@ def _score_ratio_up(row):
     w = _coerce_weight(row.get("Trọng số"))
     if plan in (None,0) or actual is None: return None
     return round(max(min(actual/plan,2.0),0.0)*10*w,2)
-
 def _score_ratio_down(row):
     plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
     actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
@@ -315,7 +293,6 @@ def _score_ratio_down(row):
     if plan in (None,0) or actual is None: return None
     ratio = 1.0 if actual<=plan else max(min(plan/actual,2.0),0.0)
     return round(ratio*10*w,2)
-
 def _score_pass_fail(row):
     plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
     actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
@@ -324,7 +301,6 @@ def _score_pass_fail(row):
     w = _coerce_weight(row.get("Trọng số"))
     if plan is None or actual is None: return None
     return round((10.0 if actual>=plan else 0.0)*w,2)
-
 def _score_range(row, overrides):
     lo = overrides.get("lo", parse_float(row.get("Ngưỡng dưới")))
     hi = overrides.get("hi", parse_float(row.get("Ngưỡng trên")))
@@ -333,21 +309,18 @@ def _score_range(row, overrides):
     w = _coerce_weight(row.get("Trọng số"))
     if lo is None or hi is None or actual is None: return None
     return round((10.0 if (lo<=actual<=hi) else 0.0)*w,2)
-
 def _score_expr(row, expr):
     plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
     actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
     if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
     if actual is None: actual = parse_float(row.get("Thực hiện"))
     w = _coerce_weight(row.get("Trọng số"))
-    lo = parse_float(row.get("Ngưỡng dưới"))
-    hi = parse_float(row.get("Ngưỡng trên"))
+    lo = parse_float(row.get("Ngưỡng dưới")); hi = parse_float(row.get("Ngưỡng trên"))
     try:
         val = _safe_eval_expr(expr, {"PLAN":plan,"ACTUAL":actual,"W":w,"LO":lo,"HI":hi})
         return None if val is None else float(val)
     except Exception:
         return None
-
 def compute_score_with_method(row):
     method_text = str(row.get("Phương pháp đo kết quả") or "").strip()
     rule, overrides = _match_rule(method_text, kpi_name=row.get("Tên chỉ tiêu (KPI)"))
@@ -360,41 +333,14 @@ def compute_score_with_method(row):
         elif t=="PASS_FAIL":    return _score_pass_fail(row)
         elif t=="RANGE":        return _score_range(row, overrides)
         elif t=="EXPR" and rule.get("expr"): return _score_expr(row, rule["expr"])
-    # fallback
+    # fallback hợp lý
     plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
     actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
     if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
     if actual is None: actual = parse_float(row.get("Thực hiện"))
     weight = parse_float(row.get("Trọng số")) or 0.0
-    method_l = (method_text or "").lower()
-    if "dự báo tổng thương phẩm" in (row.get("Tên chỉ tiêu (KPI)") or "").lower() \
-       or (("sai số" in method_l or "sai so" in method_l) and ("trừ" in method_l or "tru" in method_l)):
-        pen = 0.04 if re.search(r"0[,\.]0?4", method_l) else (0.02 if re.search(r"0[,\.]0?2", method_l) else 0.04)
-        thr = 1.5
-        m = re.search(r"(\d+)[\.,](\d+)", method_l)
-        if m:
-            try: thr = float(m.group(1)+"."+m.group(2))
-            except: pass
-        unit = str(row.get("Đơn vị tính") or "").lower()
-        err_pct = None
-        if actual is not None:
-            if actual<=5 or ("%" in unit and actual<=100):
-                err_pct = to_percent(actual)
-            elif plan not in (None,0):
-                err_pct = abs(actual-plan)/abs(plan)*100.0
-        exceed = max(0.0, (err_pct or 0.0)-thr)
-        steps  = int(exceed // 0.1)
-        penalty = min(3.0, steps*pen)
-        return -round(penalty,2)
     if plan in (None,0) or actual is None: return None
     w = weight/100.0 if (weight and weight>1) else (weight or 0.0)
-    if any(k in method_l for k in ["tăng",">=","increase","higher"]):
-        return round(max(min(actual/plan,2.0),0.0)*10*w,2)
-    if any(k in method_l for k in ["giảm","<=","decrease","lower"]):
-        ratio = 1.0 if actual<=plan else max(min(plan/actual,2.0),0.0)
-        return round(ratio*10*w,2)
-    if any(k in method_l for k in ["đạt","dat","pass/fail"]):
-        return round((10.0 if actual>=plan else 0.0)*w,2)
     ratio = max(min(actual/plan,2.0),0.0)
     return round(ratio*10*w,2)
 
@@ -418,12 +364,10 @@ def find_use_worksheet(sh):
                and ("Mật khẩu mặc định" in headers or "Password" in headers or "Mật khẩu" in headers):
                 return ws
         raise gspread.exceptions.WorksheetNotFound("Không tìm thấy sheet USE.")
-
 def load_users_df():
     sh = open_spreadsheet(st.session_state.get("spreadsheet_id",""))
     ws = find_use_worksheet(sh)
     return normalize_columns(df_from_ws(ws))
-
 def check_credentials(use_name: str, password: str) -> bool:
     df = load_users_df()
     if df.empty: return False
@@ -434,7 +378,7 @@ def check_credentials(use_name: str, password: str) -> bool:
     row = df.loc[df[col_use].astype(str).str.strip().str.lower()==u]
     return (not row.empty) and (str(row.iloc[0][col_pw]).strip()==p)
 
-# ------------------- GOOGLE DRIVE -------------------
+# ------------------- DRIVE -------------------
 def get_drive_service():
     if gbuild is None:
         st.warning("Thiếu google-api-python-client để thao tác Drive.")
@@ -445,11 +389,9 @@ def get_drive_service():
         st.session_state["_gs_pair"] = (gclient, creds)
     if creds is None: return None
     return gbuild("drive","v3",credentials=creds)
-
 def ensure_parent_ok(service, parent_id):
     try: service.files().get(fileId=parent_id, fields="id,name").execute()
     except HttpError as e: raise RuntimeError(f"Không truy cập được thư mục gốc ID: {parent_id}") from e
-
 def ensure_folder(service, parent_id, name):
     ensure_parent_ok(service, parent_id)
     q = f"mimeType='application/vnd.google-apps.folder' and name='{name}' and '{parent_id}' in parents and trashed=false"
@@ -459,28 +401,18 @@ def ensure_folder(service, parent_id, name):
     meta = {"name":name,"mimeType":"application/vnd.google-apps.folder","parents":[parent_id]}
     folder = service.files().create(body=meta, fields="id", supportsAllDrives=True).execute()
     return folder["id"]
-
 def upload_new(service, parent_id, filename, data, mime):
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
     meta = {"name":filename,"parents":[parent_id]}
     f = service.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
     return f["id"]
-
-def list_files_in_folder(service, parent_id):
-    q = f"'{parent_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"
-    res = service.files().list(q=q, spaces="drive", supportsAllDrives=True, includeItemsFromAllDrives=True,
-                               orderBy="createdTime desc", fields="files(id,name,mimeType,createdTime,modifiedTime,size)").execute()
-    return res.get("files", [])
-
 def save_report_to_drive(excel_bytes, x_ext, x_mime, pdf_bytes=None):
     service = get_drive_service()
     if service is None:
-        st.warning("Chưa cài google-api-python-client.")
-        return False, "no_client"
+        st.warning("Chưa cài google-api-python-client."); return False, "no_client"
     root_raw = st.session_state.get("drive_root_id","").strip()
     if not root_raw:
-        st.error("Chưa khai báo ID/URL thư mục gốc (của đơn vị).")
-        return False, "no_root"
+        st.error("Chưa khai báo ID/URL thư mục gốc (của đơn vị)."); return False, "no_root"
     root_id = extract_drive_folder_id(root_raw)
     try:
         folder_kpi = ensure_folder(service, root_id, "Báo cáo KPI")
@@ -519,7 +451,6 @@ def df_to_report_bytes(df: pd.DataFrame):
     except Exception:
         data = df.to_csv(index=False).encode("utf-8")
         return data,"csv","text/csv"
-
 def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI"):
     try:
         from reportlab.lib.pagesizes import A4, landscape
@@ -553,8 +484,7 @@ with st.sidebar:
         if ok:
             if check_credentials(use_input, pwd_input):
                 st.session_state["_user"] = use_input.strip()
-                toast("Đăng nhập thành công.","✅")
-                st.rerun()
+                toast("Đăng nhập thành công.","✅"); st.rerun()
             else:
                 st.error("USE hoặc mật khẩu không đúng.")
     else:
@@ -562,71 +492,55 @@ with st.sidebar:
         st.subheader("🧩 Kết nối Google Sheets")
         st.text_input("ID/URL Google Sheet", key="spreadsheet_id")
         st.text_input("Tên sheet KPI", key="kpi_sheet_name")
-
         st.subheader("📁 Lưu Google Drive (mỗi đơn vị dùng ROOT của chính mình)")
         st.text_input("ID/URL thư mục gốc (của đơn vị)", key="drive_root_id",
                       help="Dán URL thư mục hoặc ID. Service account phải có quyền Editor/Content manager.")
         st.checkbox("Tự động lưu Drive khi Ghi/Xuất", key="auto_save_drive")
-
-        if st.button("🔄 Nạp lại RULES", use_container_width=True):
-            globals()['_RULES_CACHE'] = None
-            st.success("Đã nạp lại bảng RULES.")
-            st.rerun()
-
         if st.button("Đăng xuất", use_container_width=True):
             st.session_state.pop("_user", None); toast("Đã đăng xuất.","✅"); st.rerun()
 
-# ------------------- HEADER (Logo + tiêu đề nhỏ hơn) -------------------
+# ------------------- HEADER & CSS -------------------
 def _img64_local(path: Path):
     try:
         if path.exists(): return base64.b64encode(path.read_bytes()).decode("utf-8")
     except Exception: pass
     return None
-
 LOGO_PATH = Path("assets/logo.png")
 logo64 = _img64_local(LOGO_PATH)
 
-header_html = f"""
+st.markdown(f"""
 <style>
-.app-header {{
-  display:flex; align-items:center; gap:12px; margin:4px 0 8px;
-}}
-.app-logo {{
-  width:52px; height:52px; border-radius:50%;
-  box-shadow:0 0 0 3px #fff, 0 0 0 6px #ff4b4b20;
-}}
-.app-title {{
-  margin:0; line-height:1.05; font-size:24px; font-weight:800; letter-spacing:.15px;
+.app-header {{ display:flex; align-items:center; gap:12px; margin:2px 0 10px; }}
+.app-logo {{ width:52px; height:52px; border-radius:50%; box-shadow:0 0 0 3px #fff, 0 0 0 6px #ff4b4b20; }}
+.app-title {{ margin:0; line-height:1.05; font-size:22px; font-weight:800; letter-spacing:.15px;
   background: linear-gradient(90deg,#0ea5e9 0%,#22c55e 50%,#a855f7 100%);
-  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-}}
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent; }}
 .app-sub {{ margin:0; color:#64748b; font-size:12px; }}
-/* Sticky for the container that HAS the pin marker */
-div[data-testid="stVerticalBlock"]:has(> span#pin-marker) {{
-  position: sticky; top: 8px; z-index: 50;
-  background:#fff; border:1px solid #eef2f7; border-radius:14px;
-  padding:12px 14px; box-shadow:0 6px 18px -10px rgba(0,0,0,.18);
-}}
-/* Button colors via marker + adjacent-sibling (reliable) */
-div.btn-save-marker + div.stButton > button {{ background:#22c55e !important; color:#fff !important; border-color:#22c55e !important; }}
-div.btn-refresh-marker + div.stButton > button {{ background:#f59e0b !important; color:#111 !important; border-color:#f59e0b !important; }}
-div.btn-export-marker + div.stButton > button {{ background:#3b82f6 !important; color:#fff !important; border-color:#3b82f6 !important; }}
-div.btn-drive-marker + div.stButton > button {{ background:#8b5cf6 !important; color:#fff !important; border-color:#8b5cf6 !important; }}
+
+/* STICKY form box */
+.kpi-sticky {{ position: sticky; top: 8px; z-index: 60; background:#fff; border:1px solid #eef2f7;
+  border-radius:14px; padding:12px 14px; box-shadow:0 6px 18px -10px rgba(0,0,0,.18); }}
+
+/* Nút nhiều màu – dùng marker + nút liền kề để tránh ảnh hưởng nút khác */
+div.btn-save + div.stButton > button {{ background:#22c55e !important; color:#fff !important; border-color:#22c55e !important; }}
+div.btn-refresh + div.stButton > button {{ background:#f59e0b !important; color:#111 !important; border-color:#f59e0b !important; }}
+div.btn-export + div.stButton > button {{ background:#3b82f6 !important; color:#fff !important; border-color:#3b82f6 !important; }}
+div.btn-drive + div.stButton > button {{ background:#8b5cf6 !important; color:#fff !important; border-color:#8b5cf6 !important; }}
+
+/* Metric tổng điểm đậm hơn 1 chút */
+div[data-testid="stMetricValue"] {{ font-weight: 800; }}
 </style>
 <div class="app-header">
   {"<img class='app-logo' src='"+LOGO_URL+"'>" if LOGO_URL else (("<img class='app-logo' src='data:image/png;base64,"+logo64+"'/>") if logo64 else "<div></div>")}
-  <div>
-    <h1 class="app-title">KPI – Đội quản lý Điện lực khu vực Định Hóa</h1>
-    <p class="app-sub">Biểu mẫu nhập &amp; báo cáo KPI</p>
-  </div>
+  <div><h1 class="app-title">KPI – Đội quản lý Điện lực khu vực Định Hóa</h1>
+  <p class="app-sub">Biểu mẫu nhập &amp; báo cáo KPI</p></div>
 </div>
-"""
-st.markdown(header_html, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 if "_user" not in st.session_state:
     st.info("Vui lòng đăng nhập để làm việc."); st.stop()
 
-# ------------------- MAIN STATE -------------------
+# ------------------- STATE & CỘT KPI -------------------
 KPI_COLS = ["Tên chỉ tiêu (KPI)","Đơn vị tính","Kế hoạch","Thực hiện","Trọng số","Bộ phận/người phụ trách",
             "Tháng","Năm","Phương pháp đo kết quả","Ngưỡng dưới","Ngưỡng trên","Điểm KPI","Ghi chú","Tên đơn vị"]
 
@@ -658,24 +572,13 @@ if "_csv_form" not in st.session_state:
         "Phương pháp đo kết quả":"Tăng tốt hơn", "Ngưỡng dưới":"", "Ngưỡng trên":"", "Ghi chú":"", "Tên đơn vị":""
     }
 
-if st.session_state.get("_prefill_from_row"):
-    row = st.session_state.pop("_prefill_from_row")
-    for k,v in row.items():
-        if k in KPI_COLS: st.session_state["_csv_form"][k] = v
-    st.session_state.setdefault("plan_txt","")
-    st.session_state.setdefault("actual_txt","")
-    st.session_state["plan_txt"]   = format_vn_number(parse_float(row.get("Kế hoạch") or 0), 2)
-    st.session_state["actual_txt"] = format_vn_number(parse_float(row.get("Thực hiện") or 0), 2)
-
 st.session_state.setdefault("plan_txt",   format_vn_number(st.session_state["_csv_form"].get("Kế hoạch") or 0.0, 2))
 st.session_state.setdefault("actual_txt", format_vn_number(st.session_state["_csv_form"].get("Thực hiện") or 0.0, 2))
 
-# ------------------- FORM (GHIM CỐ ĐỊNH) -------------------
+# ------------------- FORM (GHIM CỨNG) -------------------
 st.subheader("✍️ Biểu mẫu nhập tay")
-pin = st.container()
-with pin:
-    # marker để CSS bám và ghim container này
-    st.markdown('<span id="pin-marker"></span>', unsafe_allow_html=True)
+with st.container():
+    st.markdown('<div class="kpi-sticky">', unsafe_allow_html=True)
 
     f = st.session_state["_csv_form"]
 
@@ -683,7 +586,6 @@ with pin:
         val = parse_vn_number(st.session_state["plan_txt"])
         if val is not None: st.session_state["_csv_form"]["Kế hoạch"] = val
         st.session_state["plan_txt"] = format_vn_number(st.session_state["_csv_form"]["Kế hoạch"] or 0, 2)
-
     def _on_change_actual():
         val = parse_vn_number(st.session_state["actual_txt"])
         if val is not None: st.session_state["_csv_form"]["Thực hiện"] = val
@@ -728,29 +630,33 @@ with pin:
     with c4[0]: f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
     with c4[1]: f["Năm"]   = st.text_input("Năm",   value=str(f["Năm"]))
 
-    # "Áp dụng" chỉ hiện khi KHÔNG chọn dòng nào (thêm mới)
-    show_apply = st.session_state.get("_selected_idx") is None
-    if show_apply:
-        st.button("Áp dụng vào bảng CSV tạm", type="primary")
+    # Núi màu
+    b1,b2,b3,b4,b5 = st.columns([1,1,1,1,1.4])
+    with b1:
+        st.markdown('<div class="btn-save"></div>', unsafe_allow_html=True)
+        save_csv_clicked = st.button("💾 Ghi CSV tạm vào sheet KPI", use_container_width=True)
+    with b2:
+        st.markdown('<div class="btn-refresh"></div>', unsafe_allow_html=True)
+        refresh_clicked = st.button("🔁 Làm mới bảng CSV", use_container_width=True)
+    with b3:
+        st.markdown('<div class="btn-export"></div>', unsafe_allow_html=True)
+        export_clicked = st.button("📤 Xuất báo cáo (Excel/PDF)", use_container_width=True)
+    with b4:
+        st.markdown('<div class="btn-drive"></div>', unsafe_allow_html=True)
+        save_drive_clicked = st.button("☁️ Lưu dữ liệu vào Google Drive (thủ công)", use_container_width=True)
+    with b5:
+        # Tổng điểm KPI (tạm tính) – lấy từ cache hiện tại
+        total_score = None
+        if "_csv_cache" in st.session_state and not st.session_state["_csv_cache"].empty:
+            total_score = round(pd.to_numeric(st.session_state["_csv_cache"].get("Điểm KPI", pd.Series(dtype=float)), errors="coerce").fillna(0).sum(), 2)
+        st.metric("Tổng điểm KPI (tạm tính)", total_score if total_score is not None else "—")
 
-# ------------------- 4 NÚT TÁC VỤ (MỖI NÚT 1 MÀU) -------------------
-b1,b2,b3,b4 = st.columns([1,1,1,2])
-with b1:
-    st.markdown('<div class="btn-save-marker"></div>', unsafe_allow_html=True)
-    save_csv_clicked = st.button("💾 Ghi CSV tạm vào sheet KPI", use_container_width=True)
-with b2:
-    st.markdown('<div class="btn-refresh-marker"></div>', unsafe_allow_html=True)
-    refresh_clicked = st.button("🔁 Làm mới bảng CSV", use_container_width=True)
-with b3:
-    st.markdown('<div class="btn-export-marker"></div>', unsafe_allow_html=True)
-    export_clicked = st.button("📤 Xuất báo cáo (Excel/PDF)", use_container_width=True)
-with b4:
-    st.markdown('<div class="btn-drive-marker"></div>', unsafe_allow_html=True)
-    save_drive_clicked = st.button("☁️ Lưu dữ liệu vào Google Drive (thủ công)", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)  # đóng .kpi-sticky
 
 # ------------------- CSV khu vực dưới -------------------
 st.subheader("⬇️ Nhập CSV vào KPI")
 up = st.file_uploader("Tải file CSV", type=["csv"])
+
 if "_csv_cache" not in st.session_state:
     st.session_state["_csv_cache"] = pd.DataFrame(columns=KPI_COLS)
 
@@ -791,10 +697,12 @@ new_sel = new_selected_idxs[0] if new_selected_idxs else None
 if new_sel != st.session_state.get("_selected_idx"):
     st.session_state["_selected_idx"] = new_sel
     if new_sel is not None:
-        st.session_state["_prefill_from_row"] = st.session_state["_csv_cache"].loc[new_sel].to_dict()
+        st.session_state["_csv_form"].update({k: df_cache.loc[new_sel].get(k, "") for k in KPI_COLS})
+        st.session_state["plan_txt"]   = format_vn_number(parse_float(df_cache.loc[new_sel].get("Kế hoạch")  or 0), 2)
+        st.session_state["actual_txt"] = format_vn_number(parse_float(df_cache.loc[new_sel].get("Thực hiện") or 0), 2)
     st.rerun()
 
-# --- Apply form vào cache ---
+# --- Apply form vào cache (dùng chung cho các nút) ---
 def apply_form_to_cache():
     base = st.session_state["_csv_cache"].copy()
     base = coerce_numeric_cols(base)
@@ -815,19 +723,12 @@ def apply_form_to_cache():
     st.session_state["_csv_cache"] = base
 
 # --------- Hành động nút ----------
-# Nút "Áp dụng..." ở form chỉ hiển thị khi thêm mới; còn lại mọi nút dưới đây đều áp dụng form vào cache trước khi thực hiện
-
 if save_csv_clicked:
     try:
         apply_form_to_cache()
         sh, sheet_name = get_sheet_and_name()
         if write_kpi_to_sheet(sh, sheet_name, st.session_state["_csv_cache"]):
             toast(f"Đã ghi vào sheet '{sheet_name}'.","✅")
-            if st.session_state.get("auto_save_drive", False):
-                x_bytes,x_ext,x_mime = df_to_report_bytes(st.session_state["_csv_cache"])
-                pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], "BÁO CÁO KPI")
-                ok,_ = save_report_to_drive(x_bytes,x_ext,x_mime,pdf_bytes if pdf_bytes else None)
-                if ok: toast("Đã auto lưu lên Drive.","✅")
             st.rerun()
     except Exception as e:
         st.error(f"Lỗi khi ghi Sheets: {e}")
@@ -857,9 +758,6 @@ if export_clicked:
     pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], "BÁO CÁO KPI")
     if pdf_bytes:
         st.download_button("⬇️ Tải PDF báo cáo", data=pdf_bytes, file_name=f"{ts_name}.pdf", mime="application/pdf")
-    if st.session_state.get("auto_save_drive", False):
-        ok,_ = save_report_to_drive(x_bytes,x_ext,x_mime,pdf_bytes if pdf_bytes else None)
-        if ok: toast("Đã auto lưu lên Drive.","✅")
 
 if save_drive_clicked:
     try:
