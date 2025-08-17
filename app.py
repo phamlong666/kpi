@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.7)
+KPI App – Định Hóa (v3.8)
 - Form NHẬP TAY ở TRÊN, bảng CSV ở DƯỚI.
-- Bảng CSV có cột checkbox “✓ Chọn”, chọn 1 dòng để nạp ngược lên form.
-- Sửa TRIỆT ĐỂ lỗi “không cho tích chọn”: lưu _selected_idx, không reset chọn mỗi lần rerun.
+- Bảng CSV có cột checkbox “✓ Chọn”, chọn 1 dòng để nạp ngược lên form (ổn định sau rerun).
 - Phương pháp “Sai số ≤ ±1,5%; mỗi 0,1% vượt trừ 0,02 (max 3)” trả về **điểm trừ 0→3** (KHÔNG phải 10 - trừ).
   + Trên form đổi nhãn sang “Điểm trừ (tự tính)” khi dùng phương pháp này.
-- Định dạng số kiểu VN: 1.000.000,00 ở các ô Kế hoạch/Thực hiện.
-- Ghi sheet KPI (Google Sheets), Xuất Excel/PDF, Lưu vào Google Drive (khuyên dùng Shared Drive).
+- Định dạng số kiểu VN: 1.000.000,00 ở các ô Kế hoạch/Thực hiện (nhập số tự động format).
+- Ghi Google Sheets (fallback tên sheet nếu để trống), Xuất Excel (fallback openpyxl/xlsxwriter/CSV), PDF (nếu có reportlab),
+  Lưu vào Google Drive (khuyên dùng Shared Drive; có supportsAllDrives).
 
-Yêu cầu: khai báo service account trong st.secrets["gdrive_service_account"] (JSON nội dung).
+Yêu cầu: khai báo service account trong st.secrets["gdrive_service_account"].
 """
 
-import re, io
+import re
+import io
 from datetime import datetime
-import streamlit as st
+
 import pandas as pd
+import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -359,6 +361,60 @@ def upload_or_update(service, parent_id: str, filename: str, data: bytes, mime: 
             "Service account không có quota để tạo file trong 'My Drive'. Hãy dùng Shared Drive, hoặc tạo sẵn file để app UPDATE."
         ) from e
 
+# ------------------- HỖ TRỢ XUẤT EXCEL/PDF -------------------
+def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    """Trả về bytes Excel (ưu tiên openpyxl, sau đó xlsxwriter). Fallback CSV."""
+    # openpyxl
+    try:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="KPI")
+        return buf.getvalue()
+    except Exception:
+        pass
+    # xlsxwriter
+    try:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="KPI")
+        return buf.getvalue()
+    except Exception:
+        # fallback CSV
+        return df.to_csv(index=False).encode("utf-8")
+
+def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI") -> bytes:
+    try:
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib import colors
+        from reportlab.lib.units import cm
+        from reportlab.lib.styles import getSampleStyleSheet
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20
+        )
+        styles = getSampleStyleSheet()
+        story = [Paragraph(title, styles["Title"]), Spacer(1, 0.3 * cm)]
+        cols = list(df.columns)
+        data = [cols] + df.fillna("").astype(str).values.tolist()
+        t = Table(data, repeatRows=1)
+        t.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ]
+            )
+        )
+        story.append(t)
+        doc.build(story)
+        return buf.getvalue()
+    except Exception:
+        return b""
+
 # ------------------- SIDEBAR: ĐĂNG NHẬP + CẤU HÌNH -------------------
 with st.sidebar:
     st.header("🔒 Đăng nhập")
@@ -418,7 +474,8 @@ KPI_COLS = [
 
 def get_sheet_and_name():
     sid_cfg = st.session_state.get("spreadsheet_id", "") or GOOGLE_SHEET_ID_DEFAULT
-    sheet_name = st.session_state.get("kpi_sheet_name", KPI_SHEET_DEFAULT)
+    # Quan trọng: nếu để trống → fallback "KPI"
+    sheet_name = st.session_state.get("kpi_sheet_name") or KPI_SHEET_DEFAULT
     sh = open_spreadsheet(sid_cfg)
     return sh, sheet_name
 
@@ -635,39 +692,6 @@ if apply_clicked:
     st.rerun()
 
 # ------------- Xuất / Ghi Sheet / Làm mới / Lưu Drive -------------
-def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI") -> bytes:
-    try:
-        from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib import colors
-        from reportlab.lib.units import cm
-        from reportlab.lib.styles import getSampleStyleSheet
-
-        buf = io.BytesIO()
-        doc = SimpleDocTemplate(
-            buf, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20
-        )
-        styles = getSampleStyleSheet()
-        story = [Paragraph(title, styles["Title"]), Spacer(1, 0.3 * cm)]
-        cols = list(df.columns)
-        data = [cols] + df.fillna("").astype(str).values.tolist()
-        t = Table(data, repeatRows=1)
-        t.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
-                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ]
-            )
-        )
-        story.append(t)
-        doc.build(story)
-        return buf.getvalue()
-    except Exception:
-        return b""
-
 if save_csv_clicked:
     try:
         apply_form_to_cache()
@@ -698,17 +722,13 @@ if st.session_state.get("confirm_refresh", False):
 
 if export_clicked:
     apply_form_to_cache()
-    # Excel
-    buf_xlsx = io.BytesIO()
-    with pd.ExcelWriter(buf_xlsx, engine="xlsxwriter") as writer:
-        st.session_state["_csv_cache"].to_excel(writer, index=False, sheet_name="KPI")
+    excel_bytes = df_to_excel_bytes(st.session_state["_csv_cache"])
     st.download_button(
-        "⬇️ Tải Excel báo cáo",
-        data=buf_xlsx.getvalue(),
+        "⬇️ Tải báo cáo (Excel/CSV)",
+        data=excel_bytes,
         file_name="KPI_baocao.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        mime="application/octet-stream",
     )
-    # PDF
     pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], "BÁO CÁO KPI")
     if pdf_bytes:
         st.download_button("⬇️ Tải PDF báo cáo", data=pdf_bytes, file_name="KPI_baocao.pdf", mime="application/pdf")
@@ -729,14 +749,12 @@ if save_drive_clicked:
             st.session_state["_report_folder_id"] = folder_report
         ts = datetime.now().strftime("%d-%m-%y")
         fname_xlsx = f"KPI_{ts}.xlsx"
-        buf_xlsx = io.BytesIO()
-        with pd.ExcelWriter(buf_xlsx, engine="xlsxwriter") as writer:
-            st.session_state["_csv_cache"].to_excel(writer, index=False, sheet_name="KPI")
+        excel_bytes = df_to_excel_bytes(st.session_state["_csv_cache"])
         upload_or_update(
             service,
             folder_report,
             fname_xlsx,
-            buf_xlsx.getvalue(),
+            excel_bytes,
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         toast(f"Đã lưu: /{use_code}/Báo cáo KPI/{fname_xlsx}", "✅")
