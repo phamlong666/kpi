@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.10)
+KPI App – Định Hóa (v3.11)
 - Form NHẬP TAY ở TRÊN, bảng CSV ở DƯỚI.
 - Checkbox “✓ Chọn” ổn định sau rerun; chọn 1 dòng để nạp ngược lên form.
 - Phương pháp “Sai số ≤ ±1,5%; mỗi 0,1% vượt trừ 0,02 (max 3)” trả về **điểm trừ 0→3** (không phải 10 - trừ).
-- Ô Kế hoạch/Thực hiện hiển thị **dấu chấm phân tách nghìn** (1.000.000) ngay sau khi gõ/đổi (format trong callback).
+- Ô Kế hoạch/Thực hiện hiển thị **dấu chấm phân tách nghìn** (1.000.000) ngay trong callback.
 - Ghi Google Sheets (fallback tên sheet nếu trống), Xuất Excel (fallback openpyxl/xlsxwriter/CSV),
   PDF nếu có reportlab, Lưu Google Drive (supportsAllDrives; khuyên Shared Drive).
-- KHẮC PHỤC: Không ghi đè dữ liệu sau khi upload CSV — chỉ nạp CSV **khi file mới** (dựa chữ ký tên+kích thước).
-  Nhấn “Ghi CSV tạm vào sheet KPI” sẽ cập nhật ngay bảng bên dưới (và không bị CSV upload ghi đè trở lại).
-
-Yêu cầu: cấu hình service account trong st.secrets["gdrive_service_account"].
+- KHẮC PHỤC:
+  1) Không còn lỗi pandas “Invalid value … for dtype 'string'” nhờ ép kiểu số trước khi ghi/cập nhật.
+  2) Không còn hiện tượng “ghi xong bị quay về mặc định theo file” nhờ chỉ nạp CSV khi có file MỚI (ký hiệu name+bytes).
 """
 
 import re
@@ -46,7 +45,7 @@ defaults = {
     "drive_root_id":   APP_KPI_DRIVE_ROOT_ID_DEFAULT,
     "_report_folder_id": "",
     "_selected_idx": None,
-    "_csv_loaded_sig": "",   # chữ ký file CSV đã nạp (tên + kích thước)
+    "_csv_loaded_sig": "",   # chữ ký file CSV đã nạp (tên + kích thước bytes)
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -233,9 +232,18 @@ def compute_score_with_method(row):
         lo = parse_float(row.get("Ngưỡng dưới")); hi = parse_float(row.get("Ngưỡng trên"))
         if lo is None or hi is None:
             return round(max(min(actual/plan, 2.0), 0.0) * 10 * w, 2)
-        return round((10.0 if (lo <= actual <= hi) else 0.0) * w, 2)
+        return round((10.0 if (lo <= actual <= hi) else 0.0) * 10 * w, 2)
 
     return compute_score_generic(plan, actual, weight)
+
+# ------------------- ÉP KIỂU SỐ AN TOÀN -------------------
+NUMERIC_COLS = ["Kế hoạch", "Thực hiện", "Trọng số", "Ngưỡng dưới", "Ngưỡng trên", "Điểm KPI"]
+def coerce_numeric_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for c in NUMERIC_COLS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
 
 # ------------------- ĐĂNG NHẬP -------------------
 def find_use_worksheet(sh):
@@ -430,9 +438,11 @@ def get_sheet_and_name():
 
 def write_kpi_to_sheet(sh, sheet_name: str, df: pd.DataFrame) -> bool:
     df = normalize_columns(df.copy())
+    df = coerce_numeric_cols(df)  # đảm bảo cột số là số trước khi tính/ghi
     if "Điểm KPI" not in df.columns:
         df["Điểm KPI"] = df.apply(compute_score_with_method, axis=1)
     cols = [c for c in KPI_COLS if c in df.columns] + [c for c in df.columns if c not in KPI_COLS]
+    # tất cả sang str để update gspread an toàn
     data = [cols] + df[cols].fillna("").astype(str).values.tolist()
     try:
         try:
@@ -483,11 +493,10 @@ st.subheader("✍️ Biểu mẫu nhập tay")
 f = st.session_state["_csv_form"]
 
 def _on_change_plan():
-    # parse rồi format lại NGAY để có "1.000.000"
     val = parse_vn_number(st.session_state["plan_txt"])
     if val is not None:
         st.session_state["_csv_form"]["Kế hoạch"] = val
-        st.session_state["plan_txt"] = format_vn_number(val, 2)  # an toàn vì nằm trong callback của chính widget
+        st.session_state["plan_txt"] = format_vn_number(val, 2)
 
 def _on_change_actual():
     val = parse_vn_number(st.session_state["actual_txt"])
@@ -557,16 +566,17 @@ up = st.file_uploader("Tải file CSV", type=["csv"])
 if "_csv_cache" not in st.session_state:
     st.session_state["_csv_cache"] = pd.DataFrame(columns=KPI_COLS)
 
-# Chỉ nạp CSV KHI có file mới (tránh ghi đè dữ liệu đã chỉnh mỗi lần rerun)
+# Chỉ nạp CSV KHI có file mới (tránh ghi đè dữ liệu đã chỉnh mỗi rerun)
 if up is not None:
-    sig = f"{getattr(up, 'name', '')}:{getattr(up, 'size', '')}"
+    up_bytes = up.getvalue()
+    sig = f"{getattr(up, 'name', '')}:{len(up_bytes)}"
     if st.session_state.get("_csv_loaded_sig") != sig or st.session_state["_csv_cache"].empty:
         try:
-            tmp = pd.read_csv(up)
+            tmp = pd.read_csv(io.BytesIO(up_bytes))
         except Exception:
-            up.seek(0)
-            tmp = pd.read_csv(up, encoding="utf-8-sig")
+            tmp = pd.read_csv(io.BytesIO(up_bytes), encoding="utf-8-sig")
         tmp = normalize_columns(tmp)
+        tmp = coerce_numeric_cols(tmp)
         if "Điểm KPI" not in tmp.columns:
             tmp["Điểm KPI"] = tmp.apply(compute_score_with_method, axis=1)
         st.session_state["_csv_cache"] = tmp
@@ -589,7 +599,10 @@ df_edit = st.data_editor(
     key="csv_editor",
 )
 
-st.session_state["_csv_cache"] = df_edit.drop(columns=["✓ Chọn"], errors="ignore")
+# Cập nhật cache từ editor và ÉP KIỂU SỐ (tránh dtype 'string' cho cột số)
+df_cache = df_edit.drop(columns=["✓ Chọn"], errors="ignore").copy()
+df_cache = coerce_numeric_cols(df_cache)
+st.session_state["_csv_cache"] = df_cache
 
 new_selected_idxs = df_edit.index[df_edit["✓ Chọn"] == True].tolist()
 new_sel = new_selected_idxs[0] if new_selected_idxs else None
@@ -602,6 +615,7 @@ if new_sel != st.session_state.get("_selected_idx"):
 # áp dụng form vào cache (KHÔNG đụng plan_txt/actual_txt ngoài callback)
 def apply_form_to_cache():
     base = st.session_state["_csv_cache"].copy()
+    base = coerce_numeric_cols(base)  # đảm bảo cột số là số trước khi gán
     new_row = {c: st.session_state["_csv_form"].get(c, "") for c in KPI_COLS}
     new_row["Kế hoạch"]  = parse_vn_number(st.session_state.get("plan_txt", ""))
     new_row["Thực hiện"] = parse_vn_number(st.session_state.get("actual_txt", ""))
@@ -609,10 +623,16 @@ def apply_form_to_cache():
 
     sel = st.session_state.get("_selected_idx", None)
     if sel is not None and sel in base.index:
-        for k, v in new_row.items(): base.loc[sel, k] = v
+        for k, v in new_row.items():
+            # nếu cột là số nhưng v là None -> để NaN; nếu cột là text -> ép str
+            if k in NUMERIC_COLS:
+                base.loc[sel, k] = pd.to_numeric(pd.Series([v]), errors="coerce").iloc[0]
+            else:
+                base.loc[sel, k] = "" if v is None else str(v)
     else:
-        if str(new_row.get("Tên chỉ tiêu (KPI)", "")).strip():
-            base = pd.concat([base, pd.DataFrame([new_row])], ignore_index=True)
+        # thêm dòng mới
+        base = pd.concat([base, pd.DataFrame([new_row])], ignore_index=True)
+        base = coerce_numeric_cols(base)
 
     st.session_state["_csv_cache"] = base
 
@@ -628,7 +648,7 @@ if save_csv_clicked:
         sh, sheet_name = get_sheet_and_name()
         if write_kpi_to_sheet(sh, sheet_name, st.session_state["_csv_cache"]):
             toast(f"Đã ghi dữ liệu vào sheet '{sheet_name}'.", "✅")
-            st.rerun()  # đảm bảo bảng hiển thị lại đúng dữ liệu mới
+            st.rerun()  # đảm bảo bảng hiển thị đúng dữ liệu mới
     except Exception as e:
         st.error(f"Lỗi khi ghi Sheets: {e}")
 
