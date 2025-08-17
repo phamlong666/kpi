@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.14)
-- Không tách mỗi đơn vị thành 1 sheet. Dùng 1 sheet KPI chung (tên do anh đặt).
-- MỖI ĐƠN VỊ DÙNG CHÍNH THƯ MỤC ROOT CỦA HỌ (không thêm lớp <USE-code>):
-  <Root của đơn vị> / Báo cáo KPI / YYYY-MM / KPI_YYYY-MM-DD_HHMM.xlsx (+ PDF nếu có)
+KPI App – Định Hóa (v3.15)
+- Mỗi đơn vị dùng CHÍNH thư mục ROOT của mình (ID/URL folder) → KHÔNG chèn lớp <USE-code>.
+  Cấu trúc lưu: <ROOT đơn vị> / Báo cáo KPI / YYYY-MM / KPI_YYYY-MM-DD_HHMM.<xlsx|csv> (+ PDF nếu có)
+- Tự động lưu Drive khi Ghi/Xuất (bật/tắt trong Sidebar). Thêm nút "🔎 Liệt kê tháng này" để kiểm tra
+  ngay các file đã được app upload vào thư mục tháng hiện tại.
 - Hai chỉ tiêu DỰ BÁO: chỉ có ĐIỂM TRỪ (âm), ngưỡng ±1,5%, trừ 0,04 đ/0,1% (max 3). Nếu mô tả ghi 0,02 thì dùng 0,02.
 - Số nhập có dấu chấm ngăn cách nghìn; ép kiểu số khi ghi để tránh dtype 'string'.
 - Ổn định chọn dòng → prefill form → áp dụng trở lại CSV tạm, ghi xong cập nhật ngay bảng.
@@ -313,53 +314,71 @@ def upload_new(service, parent_id: str, filename: str, data: bytes, mime: str) -
                                supportsAllDrives=True).execute()
     return f["id"]
 
-def save_report_to_drive(excel_bytes: bytes, pdf_bytes: bytes|None):
-    """Lưu trực tiếp vào ROOT của ĐƠN VỊ (không thêm lớp <USE-code>):
-       <Root của đơn vị> / Báo cáo KPI / YYYY-MM / KPI_YYYY-MM-DD_HHMM.xlsx (+ PDF)"""
+def list_files_in_folder(service, parent_id: str):
+    """Liệt kê file trong folder (không gồm thư mục con)."""
+    q = (f"'{parent_id}' in parents and trashed=false and "
+         "mimeType!='application/vnd.google-apps.folder'")
+    res = service.files().list(q=q, spaces="drive", supportsAllDrives=True,
+                               includeItemsFromAllDrives=True,
+                               orderBy="createdTime desc",
+                               fields="files(id,name,mimeType,createdTime,modifiedTime,size)").execute()
+    return res.get("files", [])
+
+def save_report_to_drive(excel_bytes: bytes, x_ext: str, x_mime: str, pdf_bytes: bytes|None):
+    """Lưu trực tiếp vào ROOT của ĐƠN VỊ:
+       <Root của đơn vị> / Báo cáo KPI / YYYY-MM / KPI_YYYY-MM-DD_HHMM.<xlsx|csv> (+ PDF)"""
     service = get_drive_service()
     if service is None:
         st.warning("Chưa cài google-api-python-client nên không thể lưu Drive.")
-        return
+        return False, "no_client"
     root_raw = st.session_state.get("drive_root_id", "").strip()
     if not root_raw:
         st.error("Chưa khai báo ID/URL thư mục gốc (của đơn vị).")
-        return
+        return False, "no_root"
     root_id = extract_drive_folder_id(root_raw)
-    # Cấu trúc: root / Báo cáo KPI / YYYY-MM
-    folder_kpi   = ensure_folder(service, root_id, "Báo cáo KPI")
-    month_name   = datetime.now().strftime("%Y-%m")
-    folder_month = ensure_folder(service, folder_kpi, month_name)
+    try:
+        folder_kpi   = ensure_folder(service, root_id, "Báo cáo KPI")
+        month_name   = datetime.now().strftime("%Y-%m")
+        folder_month = ensure_folder(service, folder_kpi, month_name)
 
-    ts = datetime.now().strftime("%Y-%m-%d_%H%M")
-    fname_xlsx = f"KPI_{ts}.xlsx"
-    upload_new(service, folder_month, fname_xlsx, excel_bytes,
-               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    toast(f"✅ Đã lưu Drive: /Báo cáo KPI/{month_name}/{fname_xlsx}", "✅")
+        ts = datetime.now().strftime("%Y-%m-%d_%H%M")
+        fname_x   = f"KPI_{ts}.{x_ext}"
+        upload_new(service, folder_month, fname_x, excel_bytes, x_mime)
+        toast(f"✅ Đã lưu Drive: /Báo cáo KPI/{month_name}/{fname_x}", "✅")
 
-    if pdf_bytes:
-        try:
-            fname_pdf = f"KPI_{ts}.pdf"
-            upload_new(service, folder_month, fname_pdf, pdf_bytes, "application/pdf")
-            toast(f"✅ Đã lưu thêm PDF: {fname_pdf}", "✅")
-        except Exception:
-            st.info("Không tạo được PDF (thiếu thư viện reportlab?).")
+        if pdf_bytes:
+            try:
+                fname_pdf = f"KPI_{ts}.pdf"
+                upload_new(service, folder_month, fname_pdf, pdf_bytes, "application/pdf")
+                toast(f"✅ Đã lưu thêm PDF: {fname_pdf}", "✅")
+            except Exception as e:
+                st.info(f"Không tạo được PDF (thiếu reportlab?): {e}")
+        return True, "ok"
+    except Exception as e:
+        st.error(f"Lỗi lưu Google Drive: {e}")
+        return False, str(e)
 
 # ------------------- XUẤT EXCEL/PDF -------------------
-def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
+def df_to_report_bytes(df: pd.DataFrame):
+    """Trả về (bytes, ext, mime). Ưu tiên XLSX; nếu không có engine thì fallback CSV."""
+    # openpyxl
     try:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="KPI")
-        return buf.getvalue()
+        return buf.getvalue(), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except Exception:
         pass
+    # xlsxwriter
     try:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
             df.to_excel(writer, index=False, sheet_name="KPI")
-        return buf.getvalue()
+        return buf.getvalue(), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except Exception:
-        return df.to_csv(index=False).encode("utf-8")
+        # CSV fallback
+        data = df.to_csv(index=False).encode("utf-8")
+        return data, "csv", "text/csv"
 
 def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI") -> bytes:
     try:
@@ -413,7 +432,38 @@ with st.sidebar:
         st.text_input("ID/URL thư mục gốc (của đơn vị)", key="drive_root_id",
                       help="Dán URL thư mục hoặc ID. Phải share quyền 'Editor' cho service account.")
         st.checkbox("Tự động lưu Drive khi Ghi/Xuất", key="auto_save_drive",
-                    help="Bật: mỗi lần Ghi/Xuất sẽ upload file vào thư mục đơn vị/Tháng.")
+                    help="Bật: mỗi lần Ghi/Xuất sẽ upload file vào thư mục đơn vị / tháng hiện tại.")
+
+        # Nút kiểm tra nhanh các file đã lưu trong tháng này:
+        if st.button("🔎 Liệt kê tháng này (trong 'Báo cáo KPI/ YYYY-MM')", use_container_width=True):
+            service = get_drive_service()
+            if service is None:
+                st.warning("Chưa cài google-api-python-client.")
+            else:
+                root_raw = (st.session_state.get("drive_root_id") or "").strip()
+                if not root_raw:
+                    st.error("Chưa khai báo ID/URL thư mục gốc (của đơn vị).")
+                else:
+                    try:
+                        root_id    = extract_drive_folder_id(root_raw)
+                        folder_kpi = ensure_folder(service, root_id, "Báo cáo KPI")
+                        month_name = datetime.now().strftime("%Y-%m")
+                        folder_mon = ensure_folder(service, folder_kpi, month_name)
+                        files = list_files_in_folder(service, folder_mon)
+                        if not files:
+                            st.info(f"Chưa thấy file nào trong: Báo cáo KPI/{month_name}")
+                        else:
+                            st.success(f"Tìm thấy {len(files)} file trong tháng {month_name}:")
+                            st.dataframe(pd.DataFrame([{
+                                "Tên tệp": f["name"],
+                                "MIME": f.get("mimeType",""),
+                                "Kích thước": f.get("size",""),
+                                "Tạo lúc": f.get("createdTime",""),
+                                "Sửa lúc": f.get("modifiedTime",""),
+                                "ID": f["id"],
+                            } for f in files]))
+                    except Exception as e:
+                        st.error(f"Lỗi liệt kê: {e}")
 
         if st.button("Đăng xuất", use_container_width=True):
             st.session_state.pop("_user", None)
@@ -649,9 +699,11 @@ if save_csv_clicked:
             toast(f"Đã ghi vào sheet '{sheet_name}'.", "✅")
             # Auto save Drive nếu bật
             if st.session_state.get("auto_save_drive", False):
-                excel_bytes = df_to_excel_bytes(st.session_state["_csv_cache"])
-                pdf_bytes   = generate_pdf_from_df(st.session_state["_csv_cache"], "BÁO CÁO KPI")
-                save_report_to_drive(excel_bytes, pdf_bytes if pdf_bytes else None)
+                x_bytes, x_ext, x_mime = df_to_report_bytes(st.session_state["_csv_cache"])
+                pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], "BÁO CÁO KPI")
+                ok, _ = save_report_to_drive(x_bytes, x_ext, x_mime, pdf_bytes if pdf_bytes else None)
+                if ok:
+                    toast("Đã auto lưu lên Drive.", "✅")
             st.rerun()
     except Exception as e:
         st.error(f"Lỗi khi ghi Sheets: {e}")
@@ -677,22 +729,24 @@ if st.session_state.get("confirm_refresh", False):
 
 if export_clicked:
     apply_form_to_cache()
-    excel_bytes = df_to_excel_bytes(st.session_state["_csv_cache"])
-    st.download_button("⬇️ Tải báo cáo (Excel/CSV)", data=excel_bytes,
-                       file_name="KPI_baocao.xlsx", mime="application/octet-stream")
+    x_bytes, x_ext, x_mime = df_to_report_bytes(st.session_state["_csv_cache"])
+    st.download_button("⬇️ Tải báo cáo", data=x_bytes,
+                       file_name=f"KPI_baocao.{x_ext}", mime=x_mime)
     pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], "BÁO CÁO KPI")
     if pdf_bytes:
         st.download_button("⬇️ Tải PDF báo cáo", data=pdf_bytes,
                            file_name="KPI_baocao.pdf", mime="application/pdf")
     # Auto save Drive nếu bật
     if st.session_state.get("auto_save_drive", False):
-        save_report_to_drive(excel_bytes, pdf_bytes if pdf_bytes else None)
+        ok, _ = save_report_to_drive(x_bytes, x_ext, x_mime, pdf_bytes if pdf_bytes else None)
+        if ok:
+            toast("Đã auto lưu lên Drive.", "✅")
 
 if save_drive_clicked:
     try:
         apply_form_to_cache()
-        excel_bytes = df_to_excel_bytes(st.session_state["_csv_cache"])
-        pdf_bytes   = generate_pdf_from_df(st.session_state["_csv_cache"], "BÁO CÁO KPI")
-        save_report_to_drive(excel_bytes, pdf_bytes if pdf_bytes else None)
+        x_bytes, x_ext, x_mime = df_to_report_bytes(st.session_state["_csv_cache"])
+        pdf_bytes = generate_pdf_from_df(st.session_state["_csv_cache"], "BÁO CÁO KPI")
+        save_report_to_drive(x_bytes, x_ext, x_mime, pdf_bytes if pdf_bytes else None)
     except Exception as e:
         st.error(f"Lỗi lưu Google Drive: {e}")
