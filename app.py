@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.9)
+KPI App – Định Hóa (v3.10)
 - Form NHẬP TAY ở TRÊN, bảng CSV ở DƯỚI.
-- Ổn định checkbox chọn dòng, prefill lên form.
+- Checkbox “✓ Chọn” ổn định sau rerun; chọn 1 dòng để nạp ngược lên form.
 - Phương pháp “Sai số ≤ ±1,5%; mỗi 0,1% vượt trừ 0,02 (max 3)” trả về **điểm trừ 0→3** (không phải 10 - trừ).
-- Format số kiểu VN cho Kế hoạch/Thực hiện.
+- Ô Kế hoạch/Thực hiện hiển thị **dấu chấm phân tách nghìn** (1.000.000) ngay sau khi gõ/đổi (format trong callback).
 - Ghi Google Sheets (fallback tên sheet nếu trống), Xuất Excel (fallback openpyxl/xlsxwriter/CSV),
   PDF nếu có reportlab, Lưu Google Drive (supportsAllDrives; khuyên Shared Drive).
+- KHẮC PHỤC: Không ghi đè dữ liệu sau khi upload CSV — chỉ nạp CSV **khi file mới** (dựa chữ ký tên+kích thước).
+  Nhấn “Ghi CSV tạm vào sheet KPI” sẽ cập nhật ngay bảng bên dưới (và không bị CSV upload ghi đè trở lại).
 
 Yêu cầu: cấu hình service account trong st.secrets["gdrive_service_account"].
 """
@@ -44,6 +46,7 @@ defaults = {
     "drive_root_id":   APP_KPI_DRIVE_ROOT_ID_DEFAULT,
     "_report_folder_id": "",
     "_selected_idx": None,
+    "_csv_loaded_sig": "",   # chữ ký file CSV đã nạp (tên + kích thước)
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -421,7 +424,7 @@ KPI_COLS = [
 
 def get_sheet_and_name():
     sid_cfg = st.session_state.get("spreadsheet_id", "") or GOOGLE_SHEET_ID_DEFAULT
-    sheet_name = st.session_state.get("kpi_sheet_name") or KPI_SHEET_DEFAULT   # <— quan trọng
+    sheet_name = st.session_state.get("kpi_sheet_name") or KPI_SHEET_DEFAULT
     sh = open_spreadsheet(sid_cfg)
     return sh, sheet_name
 
@@ -480,15 +483,17 @@ st.subheader("✍️ Biểu mẫu nhập tay")
 f = st.session_state["_csv_form"]
 
 def _on_change_plan():
+    # parse rồi format lại NGAY để có "1.000.000"
     val = parse_vn_number(st.session_state["plan_txt"])
     if val is not None:
         st.session_state["_csv_form"]["Kế hoạch"] = val
-        # KHÔNG set lại plan_txt ở đây, để tránh lỗi
+        st.session_state["plan_txt"] = format_vn_number(val, 2)  # an toàn vì nằm trong callback của chính widget
 
 def _on_change_actual():
     val = parse_vn_number(st.session_state["actual_txt"])
     if val is not None:
         st.session_state["_csv_form"]["Thực hiện"] = val
+        st.session_state["actual_txt"] = format_vn_number(val, 2)
 
 c0 = st.columns([2,1,1,1])
 with c0[0]:
@@ -551,14 +556,21 @@ st.subheader("⬇️ Nhập CSV vào KPI")
 up = st.file_uploader("Tải file CSV", type=["csv"])
 if "_csv_cache" not in st.session_state:
     st.session_state["_csv_cache"] = pd.DataFrame(columns=KPI_COLS)
+
+# Chỉ nạp CSV KHI có file mới (tránh ghi đè dữ liệu đã chỉnh mỗi lần rerun)
 if up is not None:
-    try: tmp = pd.read_csv(up)
-    except Exception:
-        up.seek(0); tmp = pd.read_csv(up, encoding="utf-8-sig")
-    tmp = normalize_columns(tmp)
-    if "Điểm KPI" not in tmp.columns:
-        tmp["Điểm KPI"] = tmp.apply(compute_score_with_method, axis=1)
-    st.session_state["_csv_cache"] = tmp
+    sig = f"{getattr(up, 'name', '')}:{getattr(up, 'size', '')}"
+    if st.session_state.get("_csv_loaded_sig") != sig or st.session_state["_csv_cache"].empty:
+        try:
+            tmp = pd.read_csv(up)
+        except Exception:
+            up.seek(0)
+            tmp = pd.read_csv(up, encoding="utf-8-sig")
+        tmp = normalize_columns(tmp)
+        if "Điểm KPI" not in tmp.columns:
+            tmp["Điểm KPI"] = tmp.apply(compute_score_with_method, axis=1)
+        st.session_state["_csv_cache"] = tmp
+        st.session_state["_csv_loaded_sig"] = sig
 
 base = st.session_state["_csv_cache"]
 df_show = base.copy()
@@ -587,7 +599,7 @@ if new_sel != st.session_state.get("_selected_idx"):
         st.session_state["_prefill_from_row"] = st.session_state["_csv_cache"].loc[new_sel].to_dict()
     st.rerun()
 
-# áp dụng form vào cache (KHÔNG thay đổi plan_txt/actual_txt – tránh lỗi widget)
+# áp dụng form vào cache (KHÔNG đụng plan_txt/actual_txt ngoài callback)
 def apply_form_to_cache():
     base = st.session_state["_csv_cache"].copy()
     new_row = {c: st.session_state["_csv_form"].get(c, "") for c in KPI_COLS}
@@ -603,7 +615,6 @@ def apply_form_to_cache():
             base = pd.concat([base, pd.DataFrame([new_row])], ignore_index=True)
 
     st.session_state["_csv_cache"] = base
-    # KHÔNG set st.session_state["plan_txt"] / ["actual_txt"] ở đây!
 
 if apply_clicked:
     apply_form_to_cache()
@@ -613,10 +624,11 @@ if apply_clicked:
 # --------- Ghi/Refresh/Export/Drive ----------
 if save_csv_clicked:
     try:
-        apply_form_to_cache()
+        apply_form_to_cache()  # cập nhật ngay bảng bên dưới
         sh, sheet_name = get_sheet_and_name()
         if write_kpi_to_sheet(sh, sheet_name, st.session_state["_csv_cache"]):
             toast(f"Đã ghi dữ liệu vào sheet '{sheet_name}'.", "✅")
+            st.rerun()  # đảm bảo bảng hiển thị lại đúng dữ liệu mới
     except Exception as e:
         st.error(f"Lỗi khi ghi Sheets: {e}")
 
@@ -640,7 +652,7 @@ if st.session_state.get("confirm_refresh", False):
             toast("Đã hủy làm mới.", "ℹ️")
 
 if export_clicked:
-    apply_form_to_cache()
+    apply_form_to_cache()  # cập nhật rồi mới xuất
     excel_bytes = df_to_excel_bytes(st.session_state["_csv_cache"])
     st.download_button("⬇️ Tải báo cáo (Excel/CSV)", data=excel_bytes,
                        file_name="KPI_baocao.xlsx", mime="application/octet-stream")
