@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 # KPI – Đội quản lý Điện lực khu vực Định Hóa
-# Bản ổn định chống "load đi load lại":
-# - Không dùng st.rerun khi tick chọn; chỉ rerun 1 lần sau khi upload CSV (có token chống lặp)
-# - Đồng bộ form từ dòng đã tích TRƯỚC khi vẽ widget
-# - Bố cục 2 cột: Trái = Form sticky; Phải = Bảng CSV tạm
-# - Bỏ "Tên đơn vị" khỏi form; thay "Phương pháp..." bằng "Điểm KPI (tự tính)"
-# - Dấu chấm ngăn cách số; 4 nút 4 màu; Ghi Google Sheet; Xuất Excel
+# Bản ổn định:
+# - Có ô CHỌN PHƯƠNG PHÁP ĐÁNH GIÁ (combo) trên form
+# - Nhập số có DẤU CHẤM ngăn cách (auto-format qua on_change)
+# - Tick "Chọn" -> form tự nạp (đồng bộ TRƯỚC khi vẽ widget, không dùng rerun vòng lặp)
+# - Upload CSV -> chỉ rerun 1 lần bằng token (không load lặp)
+# - Bố cục 2 cột: Trái = form sticky; Phải = bảng CSV tạm
+# - Bỏ "Tên đơn vị" khỏi form; hiển thị "Điểm KPI (tự tính)"
+# - 4 nút 4 màu; Ghi Google Sheet; Xuất Excel
 
-import re, io, json, math
+import re, io, math
 from datetime import datetime
 from pathlib import Path
 import pandas as pd
@@ -46,7 +48,7 @@ with c2:
     st.markdown('<h1 class="app-title">KPI – Đội quản lý Điện lực khu vực Định Hóa</h1>', unsafe_allow_html=True)
     st.markdown('<div class="app-sub">Form nhập tay GHIM CỨNG + chấm điểm theo RULES</div>', unsafe_allow_html=True)
 
-# ================== NUMBER HELPERS ==================
+# ================== HELPERS ==================
 def _to_float(x):
     try:
         if x is None: return None
@@ -67,6 +69,13 @@ def _w_ratio(w):
     v=_to_float(w)
     if v is None: return 0.0
     return v/100.0 if v>1 else v
+
+# Auto-format input (thêm dấu chấm ngăn cách): dùng trong on_change
+def _on_change_format_number(key:str, nd:int):
+    s = st.session_state.get(key, "")
+    v = _to_float(s)
+    if v is not None:
+        st.session_state[key] = _fmt_vn(v, nd)
 
 # ================== GOOGLE SHEETS (optional) ==================
 try:
@@ -154,14 +163,45 @@ def compute_score(row):
     if "≤" in ml or "<=" in ml or "giảm tốt hơn" in ml: return _score_ratio_down(row)
     return _score_ratio_up(row)
 
+# ================== RULES (combo chọn phương pháp) ==================
+@st.cache_data(ttl=600)
+def load_rules():
+    base = {
+        "PASS_FAIL_DEFAULT": {"Type":"PASS_FAIL", "Label":"Đạt / Không đạt"},
+        "RATIO_UP_DEFAULT":  {"Type":"RATIO_UP",  "Label":"Tăng – đạt/vượt kế hoạch"},
+        "RATIO_DOWN_DEFAULT":{"Type":"RATIO_DOWN","Label":"Giảm – càng thấp càng tốt"},
+        "PENALTY_ERR_004":   {"Type":"PENALTY_ERR","Label":"Dự báo sai số ±1.5%, trừ 0.04/0.1% (tối đa 3đ)"},
+        "MANUAL_POINT":      {"Type":"MANUAL", "Label":"Nhập tay điểm KPI"},
+    }
+    # Có thể mở rộng từ Sheet RULES nếu tồn tại
+    try:
+        sh=_open_spreadsheet()
+        try: ws=sh.worksheet("RULES")
+        except: return base
+        df=pd.DataFrame(ws.get_all_records())
+        for _,r in df.iterrows():
+            code=str(r.get("Code") or "").strip().upper()
+            if code and code not in base:
+                t=str(r.get("Type") or "").strip().upper()
+                base[code]={"Type":t,"Label":f"{code} ({t})"}
+    except Exception:
+        pass
+    return base
+
+def _on_change_method_select():
+    code = st.session_state.get("method_select_code")
+    if code:
+        st.session_state["method_txt"] = f"[{code}]"
+
 # ================== STATE ==================
 ss = st.session_state
 if "df" not in ss: ss.df = pd.DataFrame()
 if "logged_in" not in ss: ss.logged_in = False
 if "last_selected_index" not in ss: ss.last_selected_index = None
 if "method_txt" not in ss: ss.method_txt = "[PASS_FAIL_DEFAULT]"
-if "csv_last_token" not in ss: ss.csv_last_token = None   # (name, size) của CSV đã xử lý
-if "csv_rerun_flag" not in ss: ss.csv_rerun_flag = False  # tránh rerun lặp
+if "method_select_code" not in ss: ss.method_select_code = "PASS_FAIL_DEFAULT"
+if "csv_last_token" not in ss: ss.csv_last_token = None
+if "csv_rerun_flag" not in ss: ss.csv_rerun_flag = False
 
 # ================== SIDEBAR (LOGIN + SHEETS) ==================
 with st.sidebar:
@@ -190,7 +230,7 @@ if not ss.logged_in:
     st.warning("Vui lòng đăng nhập để bắt đầu làm việc.")
     st.stop()
 
-# ================== ĐỒNG BỘ FORM TỪ DÒNG ĐÃ TÍCH (TRƯỚC KHI VẼ FORM) ==================
+# ================== ĐỒNG BỘ FORM TỪ DÒNG TÍCH (TRƯỚC KHI VẼ FORM) ==================
 def _sync_form_from_selected_index(idx):
     df = ss.df
     r = df.loc[idx]
@@ -204,8 +244,9 @@ def _sync_form_from_selected_index(idx):
     ss.year_txt      = str(r.get("Năm") or str(datetime.now().year))
     ss.note_txt      = str(r.get("Ghi chú") or "")
     ss.method_txt    = str(r.get("Phương pháp đo kết quả") or ss.method_txt)
+    m = re.search(r"\[([A-Za-z0-9_]+)\]", ss.method_txt)
+    ss.method_select_code = m.group(1).upper() if m else "PASS_FAIL_DEFAULT"
 
-# Nếu có đúng 1 dòng được tick và index khác lần trước -> đồng bộ ngay (không rerun)
 if not ss.df.empty and "Chọn" in ss.df.columns:
     sel_idx = ss.df.index[ss.df["Chọn"]==True].tolist()
     if len(sel_idx)==1 and ss.last_selected_index != sel_idx[0]:
@@ -225,19 +266,43 @@ with left:
     with r1[2]: dept  = st.text_input("Bộ phận/người phụ trách", key="dept_txt", value=ss.get("dept_txt",""))
 
     r2 = st.columns([1,1,1])
-    with r2[0]: plan   = st.text_input("Kế hoạch", key="plan_txt", value=ss.get("plan_txt","0,00"), help="Dùng dấu chấm phân tách hàng nghìn (1.000.000)")
-    with r2[1]: actual = st.text_input("Thực hiện", key="actual_txt", value=ss.get("actual_txt","0,00"), help="Dùng dấu chấm phân tách hàng nghìn")
-    with r2[2]: weight = st.text_input("Trọng số (%)", key="weight_txt", value=ss.get("weight_txt","100"), help="Ví dụ 40 hoặc 40% (nhập 40)")
+    with r2[0]:
+        st.text_input("Kế hoạch", key="plan_txt",
+                      value=ss.get("plan_txt","0,00"),
+                      help="Dùng dấu chấm phân tách hàng nghìn (ví dụ 1.000.000)",
+                      on_change=_on_change_format_number, args=("plan_txt",2))
+    with r2[1]:
+        st.text_input("Thực hiện", key="actual_txt",
+                      value=ss.get("actual_txt","0,00"),
+                      help="Dùng dấu chấm phân tách hàng nghìn",
+                      on_change=_on_change_format_number, args=("actual_txt",2))
+    with r2[2]:
+        st.text_input("Trọng số (%)", key="weight_txt",
+                      value=ss.get("weight_txt","100"),
+                      help="Ví dụ 40 (tương đương 40%)",
+                      on_change=_on_change_format_number, args=("weight_txt",0))
+
+    # CHỌN PHƯƠNG PHÁP ĐÁNH GIÁ (combo)
+    rules = load_rules()
+    codes = list(rules.keys())
+    labels = [f"{rules[c].get('Label', c)}  [{c}]" for c in codes]
+    try:
+        idx = codes.index(ss.get("method_select_code","PASS_FAIL_DEFAULT"))
+    except ValueError:
+        idx = 0
+    st.selectbox("Chọn phương pháp đánh giá", labels, index=idx, key="method_select_code",
+                 on_change=_on_change_method_select)
 
     r3 = st.columns([1,1,2])
     with r3[0]: month = st.text_input("Tháng", key="month_txt", value=ss.get("month_txt","7"))
     with r3[1]: year  = st.text_input("Năm", key="year_txt", value=ss.get("year_txt", str(datetime.now().year)))
     with r3[2]: note  = st.text_input("Ghi chú", key="note_txt", value=ss.get("note_txt",""))
 
-    # Điểm KPI (tự tính) – thay cho ô Phương pháp
+    # Điểm KPI (tự tính) – hiển thị ngay
     preview = compute_score({
         "Phương pháp đo kết quả": ss.get("method_txt","[PASS_FAIL_DEFAULT]"),
-        "Kế hoạch": plan, "Thực hiện": actual, "Trọng số": weight, "Ghi chú": note
+        "Kế hoạch": ss.get("plan_txt"), "Thực hiện": ss.get("actual_txt"),
+        "Trọng số": ss.get("weight_txt"), "Ghi chú": ss.get("note_txt")
     })
     score_txt = "" if preview is None else _fmt_vn(preview,2)
     st.text_input("Điểm KPI (tự tính)", value=score_txt, disabled=True)
@@ -270,7 +335,7 @@ with right:
     if not ss.df.empty:
         df = ss.df.copy()
 
-        # Tính lại điểm (dựa vào phương pháp trong df)
+        # Tính lại điểm dựa trên phương pháp trong df
         scores=[]
         for _, r in df.iterrows():
             s=compute_score(r)
@@ -284,7 +349,7 @@ with right:
             if vv is not None: total+=vv
         st.markdown(f"<div class='total-box'>Tổng điểm KPI (tạm tính): <b>{_fmt_vn(total,2)}</b></div>", unsafe_allow_html=True)
 
-        # Hiển thị có dấu chấm ngăn cách
+        # Hiển thị có dấu chấm ngăn cách (không đổi dữ liệu gốc)
         show_df=df.copy()
         for col in ["Kế hoạch","Thực hiện","Trọng số","Điểm KPI"]:
             if col in show_df.columns:
@@ -301,16 +366,16 @@ with right:
             height=540,
             num_rows="dynamic",
             column_config={"Chọn": st.column_config.CheckboxColumn("Chọn", help="Tích để nạp form tự động")},
-            disabled=[],  # cho phép tick chọn
+            disabled=[],  # cho phép tick & chỉnh trực tiếp
             key="kpi_editor"
         )
 
-        # Ánh xạ ngược (nếu người dùng sửa trực tiếp các ô text)
+        # Ghi ngược chỉnh sửa của người dùng vào df gốc (parser sẽ xử lý khi tính điểm)
         for col in df.columns:
             if col in edited.columns:
                 df[col]=edited[col]
 
-        ss.df = df  # lưu lại df sau editor
+        ss.df = df
     else:
         st.info("Chưa có dữ liệu – vui lòng tải CSV mẫu ở phần dưới.")
 
@@ -333,7 +398,7 @@ if 'apply_btn' in locals() and apply_btn:
                 df.loc[mask,"Kế hoạch"]=ss.plan_txt
                 df.loc[mask,"Thực hiện"]=ss.actual_txt
                 df.loc[mask,"Trọng số"]=ss.weight_txt
-                # Giữ nguyên "Phương pháp đo kết quả" theo dòng
+                df.loc[mask,"Phương pháp đo kết quả"]=ss.method_txt  # từ combo
                 df.loc[mask,"Tháng"]=ss.month_txt
                 df.loc[mask,"Năm"]=ss.year_txt
                 df.loc[mask,"Ghi chú"]=ss.note_txt
@@ -383,11 +448,10 @@ if 'export_btn' in locals() and export_btn:
         except Exception as e:
             st.error(f"Lỗi xuất báo cáo: {e}")
 
-# ================== (ĐẶT DƯỚI CÙNG) NHẬP CSV + RERUN 1 LẦN ==================
+# ================== (DƯỚI CÙNG) NHẬP CSV + RERUN 1 LẦN ==================
 st.subheader("📥 Nhập CSV vào KPI")
 up = st.file_uploader("Tải file CSV (mẫu KPI_Input_template.csv)", type=["csv"], accept_multiple_files=False)
 if up is not None:
-    # token nhận diện file mới (name, size)
     token = (getattr(up, "name", "uploaded.csv"), getattr(up, "size", None))
     if ss.csv_last_token != token:
         try:
@@ -401,11 +465,10 @@ if up is not None:
             ss.df=df
             ss.last_selected_index=None
             ss.csv_last_token = token
-            ss.csv_rerun_flag = True  # đánh dấu cần rerun 1 lần để bảng phía trên thấy df mới
+            ss.csv_rerun_flag = True
         except Exception as e:
             st.error(f"Lỗi đọc CSV: {e}")
 
-# Chỉ rerun đúng 1 lần sau khi nạp CSV, rồi tắt cờ (tránh lặp)
 if ss.csv_rerun_flag:
     ss.csv_rerun_flag = False
     st.rerun()
