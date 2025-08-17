@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-KPI App – Định Hóa (v3.18, RULES engine + UI)
-- Header có logo tròn (fallback nếu chưa có logo)
-- 4 nút hành động mỗi nút 1 màu (ổn định với anchor riêng)
-- RULES engine: tách luật chấm điểm ra bảng RULES trong Google Sheet, hỗ trợ override tại chỗ
-- Sidebar có nút 🔄 Nạp lại RULES
-- Giữ logic: đăng nhập, đọc/ghi Google Sheets, xuất Excel/PDF, (tuỳ chọn) lưu Google Drive
+KPI App – Định Hóa (v3.19, RULES engine + PENALTY_FLAG + UI polish)
+- Đăng nhập (bấm Enter trong form để gửi)
+- Biểu mẫu nhập tay ở TRÊN, có tính "Điểm KPI (tự tính)" theo máy luật
+- CSV editor với checkbox "✓ Chọn" để nạp ngược lên biểu mẫu
+- 4 nút tác vụ mỗi nút 1 màu: Ghi CSV → Sheet, Làm mới, Xuất Excel/PDF, Lưu Google Drive
+- Google Drive: lưu vào <ROOT đơn vị>/Báo cáo KPI/YYYY-MM/KPI_YYYY-MM-DD_HHMM.*
+- RULES engine:
+    + PENALTY_ERR: phạt theo % sai số (0,04 hoặc 0,02 điểm/0,1%; cap 3)
+    + PENALTY_FLAG: phạt cố định khi vi phạm (ví dụ SAIFI: vượt chỉ tiêu → trừ 0,25)
+    + RATIO_UP / RATIO_DOWN / PASS_FAIL / RANGE / EXPR
+    + Nút 🔄 Nạp lại RULES (đọc từ sheet RULES nếu có)
+- Logo tròn: assets/logo.png (nếu chưa có sẽ hiển thị vòng tròn KPI)
 """
 
 import re
@@ -33,14 +39,14 @@ except Exception:
 # ------------------- CẤU HÌNH -------------------
 st.set_page_config(page_title="KPI – Định Hóa", layout="wide")
 
-# (Ví dụ) ID Google Sheet chứa dữ liệu KPI/USE (anh thay bằng sheet thật của anh)
+# (Ví dụ) ID Google Sheet chứa dữ liệu KPI/USE (thay bằng sheet thật)
 GOOGLE_SHEET_ID_DEFAULT = "1nXFKJrn8oHwQgUzv5QYihoazYRhhS1PeN-xyo7Er2iM"
 KPI_SHEET_DEFAULT = "KPI"
 
 defaults = {
     "spreadsheet_id": GOOGLE_SHEET_ID_DEFAULT,
     "kpi_sheet_name": KPI_SHEET_DEFAULT,
-    "drive_root_id": "",           # URL/ID thư mục gốc của ĐƠN VỊ (khuyên dùng Shared Drive)
+    "drive_root_id": "",           # URL/ID thư mục gốc của ĐƠN VỊ (khuyên dùng Shared Drive / hoặc folder đã share cho service account)
     "_selected_idx": None,
     "_csv_loaded_sig": "",
     "auto_save_drive": False,      # thử nghiệm nên mặc định tắt tự lưu Drive
@@ -198,22 +204,31 @@ _RULES_CACHE = None  # cache đọc từ sheet RULES
 
 # Luật mặc định nếu không có sheet RULES
 _RULES_DEFAULT = [
+    # Phạt theo % sai số (ngưỡng ±1.5%, bước 0.1%, trừ 0.04 điểm/bước, cap 3)
     {
         "Code":"PENALTY_ERR_004", "Type":"PENALTY_ERR",
         "thr":1.5, "step":0.1, "pen":0.04, "cap":3.0,
         "keywords":"dự báo tổng thương phẩm; sai số ±1,5%; tru 0,04; trừ 0,04"
     },
+    # Biến thể 0.02
     {
         "Code":"PENALTY_ERR_002", "Type":"PENALTY_ERR",
         "thr":1.5, "step":0.1, "pen":0.02, "cap":3.0,
         "keywords":"sai số ±1,5%; tru 0,02; trừ 0,02"
+    },
+    # Phạt cố định khi vi phạm (cho các KPI kiểu SAIFI, SAIDI, …)
+    {
+        "Code":"PENALTY_FLAG_025", "Type":"PENALTY_FLAG",
+        # op tự suy từ tên KPI nếu không ghi: "≤" -> <= ; "≥" -> >=
+        "pen":0.25,
+        "keywords":"vượt chỉ tiêu; vuot chi tieu; trừ 0,25; tru 0,25; phạt khi vi phạm; tru co dinh; saifi"
     },
     {"Code":"RATIO_UP",   "Type":"RATIO_UP",   "keywords":"tăng tốt hơn; >=; increase; higher"},
     {"Code":"RATIO_DOWN", "Type":"RATIO_DOWN", "keywords":"giảm tốt hơn; <=; decrease; lower"},
     {"Code":"PASS_FAIL",  "Type":"PASS_FAIL",  "keywords":"đạt/không đạt; dat/khong dat; pass/fail"},
     {"Code":"RANGE",      "Type":"RANGE",      "keywords":"khoảng; range; trong khoảng"},
     # Ví dụ EXPR:
-    # {"Code":"CUSTOM_EXPR_1", "Type":"EXPR", "expr":"round(min(ACTUAL/PLAN,2.0)*10*W,2)"}
+    # {"Code":"CUSTOM_EXPR_1", "Type":"EXPR", "expr":"round(min(ACTUAL/PLAN,2.0)*10*W,2)", "keywords":"công thức"}
 ]
 
 def _to_float(x):
@@ -266,7 +281,10 @@ def load_rules_registry():
                 rule["Code"] = str(rule.get("Code") or "").strip()
                 rule["Type"] = str(rule.get("Type") or "").strip().upper()
                 for k in ("thr","step","pen","cap"):
-                    rule[k] = _to_float(rule.get(k)) if rule.get(k)!="" else None
+                    rule[k] = _to_float(rule.get(k)) if (str(rule.get(k) or "")!="") else None
+                # params mở rộng
+                for k in ("op","lo","hi"):
+                    rule[k] = rule.get(k) if str(rule.get(k) or "")!="" else None
                 rule["expr"] = str(rule.get("expr") or "").strip()
                 rule["keywords"] = str(rule.get("keywords") or "").lower()
                 if rule["Code"] and rule["Type"]:
@@ -285,7 +303,8 @@ def _parse_overrides(txt):
     """
     Cho phép ghi trong 'Phương pháp đo kết quả':
     [PENALTY_ERR] thr=1.5; step=0.1; pen=0.04; cap=3
-    hoặc [RANGE] lo=..., hi=...
+    [PENALTY_FLAG] op=<=; pen=0.25
+    [RANGE] lo=...; hi=...
     """
     code, overrides = None, {}
     m = re.search(r"\[([A-Za-z0-9_]+)\]", str(txt))
@@ -293,10 +312,14 @@ def _parse_overrides(txt):
     for k,v in re.findall(r"([A-Za-z_]+)\s*=\s*([0-9\.,-]+)", str(txt)):
         k = k.strip().lower()
         v = v.strip().replace(".","").replace(",",".")
-        overrides[k] = _to_float(v)
+        overrides[k] = _to_float(v) if k not in ("op",) else v
+    # cho phép op là chuỗi ("<=" hoặc ">=")
+    mop = re.search(r"op\s*=\s*(<=|>=)", str(txt))
+    if mop:
+        overrides["op"] = mop.group(1)
     return code, overrides
 
-def _match_rule(method_text):
+def _match_rule(method_text, kpi_name=None):
     """Ưu tiên: mã trong [] → từ khóa → None."""
     rules = load_rules_registry()
     txt = (method_text or "").strip()
@@ -310,7 +333,23 @@ def _match_rule(method_text):
         kw = r.get("keywords","")
         if any(k.strip() and k.strip() in t for k in kw.split(";")):
             return r, {}
+    # fallback: nếu trong tên KPI có '≤' hoặc '≥', ta vẫn có thể đoán RATIO_DOWN/UP
+    if kpi_name:
+        name = str(kpi_name)
+        if "≤" in name or "<=" in name.lower():
+            return {"Code":"RATIO_DOWN_AUTO","Type":"RATIO_DOWN"}, {}
+        if "≥" in name or ">=" in name.lower():
+            return {"Code":"RATIO_UP_AUTO","Type":"RATIO_UP"}, {}
     return None, {}
+
+def _deduce_op_from_name(row):
+    name = str(row.get("Tên chỉ tiêu (KPI)") or "")
+    name_l = name.lower()
+    if "≤" in name or "<=" in name_l or "≤ kế hoạch" in name_l or "ke hoach" in name_l:
+        return "<="
+    if "≥" in name or ">=" in name_l:
+        return ">="
+    return "<="
 
 def _score_penalty_err(row, rule, overrides):
     plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
@@ -334,6 +373,28 @@ def _score_penalty_err(row, rule, overrides):
     steps  = int(exceed // (step or 0.1))
     penalty = min(cap or 3.0, steps * (pen or 0.04))
     return -round(penalty, 2)
+
+def _score_penalty_flag(row, rule, overrides):
+    plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
+    actual = parse_vn_number(st.session_state.get("actual_txt","")) if "actual_txt" in st.session_state else None
+    if plan is None:   plan   = parse_float(row.get("Kế hoạch"))
+    if actual is None: actual = parse_float(row.get("Thực hiện"))
+
+    pen = overrides.get("pen", rule.get("pen", 0.25))  # mặc định 0.25
+    op  = overrides.get("op", rule.get("op")) or _deduce_op_from_name(row)
+
+    if plan is None or actual is None:
+        return None
+
+    violated = False
+    if op == "<=":
+        violated = actual > plan
+    elif op == ">=":
+        violated = actual < plan
+    else:
+        violated = actual > plan
+
+    return -float(pen) if violated else 0.0
 
 def _score_ratio_up(row):
     plan   = parse_vn_number(st.session_state.get("plan_txt","")) if "plan_txt" in st.session_state else None
@@ -387,14 +448,16 @@ def _score_expr(row, expr):
         return None
 
 def compute_score_with_method(row):
-    """Chấm điểm dựa trên RULES. Nếu không khớp luật → fallback heuristic."""
+    """Chấm điểm dựa trên RULES. Nếu không khớp luật → heuristic tương thích cũ."""
     method_text = str(row.get("Phương pháp đo kết quả") or "").strip()
-    rule, overrides = _match_rule(method_text)
+    rule, overrides = _match_rule(method_text, kpi_name=row.get("Tên chỉ tiêu (KPI)"))
 
     if rule:
         t = rule.get("Type","").upper()
         if t == "PENALTY_ERR":
             return _score_penalty_err(row, rule, overrides)
+        elif t == "PENALTY_FLAG":
+            return _score_penalty_flag(row, rule, overrides)
         elif t == "RATIO_UP":
             return _score_ratio_up(row)
         elif t == "RATIO_DOWN":
@@ -414,6 +477,7 @@ def compute_score_with_method(row):
     weight = parse_float(row.get("Trọng số")) or 0.0
     method_l = method_text.lower()
 
+    # Dự báo → điểm trừ (mặc định 0.04 nếu text có '0,04', ngược lại 0.02 nếu thấy '0,02')
     if "dự báo tổng thương phẩm" in (row.get("Tên chỉ tiêu (KPI)") or "").lower() \
        or (("sai số" in method_l or "sai so" in method_l) and ("trừ" in method_l or "tru" in method_l)):
         pen = 0.04 if re.search(r"0[,\.]0?4", method_l) else (0.02 if re.search(r"0[,\.]0?2", method_l) else 0.04)
@@ -651,6 +715,7 @@ def generate_pdf_from_df(df: pd.DataFrame, title="BÁO CÁO KPI") -> bytes:
 with st.sidebar:
     st.header("🔒 Đăng nhập")
     if "_user" not in st.session_state:
+        # Form: bấm Enter sẽ submit
         with st.form("login_form", clear_on_submit=False):
             use_input = st.text_input("USE (vd: PCTN\\KVDHA)")
             pwd_input = st.text_input("Mật khẩu", type="password")
@@ -912,8 +977,9 @@ with c2[0]:
         "Giảm tốt hơn",
         "Đạt/Không đạt",
         "Trong khoảng",
-        "Sai số ±1,5%: trừ 0,04 điểm/0,1% (max 3)",
-        "Sai số ±1,5%: trừ 0,02 điểm/0,1% (max 3)",
+        "Phạt khi vi phạm (trừ cố định)",  # → PENALTY_FLAG (mặc định pen=0.25; op suy từ tên KPI)
+        "Sai số ±1,5%: trừ 0,04 điểm/0,1% (max 3)",  # → PENALTY_ERR (0.04)
+        "Sai số ±1,5%: trừ 0,02 điểm/0,1% (max 3)",  # → PENALTY_ERR (0.02)
     ]
     cur = f.get("Phương pháp đo kết quả", "Tăng tốt hơn")
     f["Phương pháp đo kết quả"] = st.selectbox(
