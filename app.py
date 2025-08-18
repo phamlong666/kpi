@@ -510,7 +510,7 @@ logo64 = _img64_local(LOGO_PATH)
 
 st.markdown(f"""
 <style>
-.app-header {{ display:flex; align-items:center; gap:12px; margin:2px 0 10px; }}
+.app-header {{ display:flex; align-items:center; gap:12px; margin:0 0 6px; }}
 .app-logo {{ width:52px; height:52px; border-radius:50%; box-shadow:0 0 0 3px #fff, 0 0 0 6px #ff4b4b20; }}
 .app-title {{ margin:0; line-height:1.05; font-size:22px; font-weight:800; letter-spacing:.15px;
   background: linear-gradient(90deg,#0ea5e9 0%,#22c55e 50%,#a855f7 100%);
@@ -595,8 +595,6 @@ with st.container():
     with c0[0]: f["Tên chỉ tiêu (KPI)"] = st.text_input("Tên chỉ tiêu (KPI)", value=f["Tên chỉ tiêu (KPI)"])
     with c0[1]: f["Đơn vị tính"] = st.text_input("Đơn vị tính", value=f["Đơn vị tính"])
     with c0[2]: f["Bộ phận/người phụ trách"] = st.text_input("Bộ phận/người phụ trách", value=f["Bộ phận/người phụ trách"])
-    with c0[3]: f["Tên đơn vị"] = st.text_input("Tên đơn vị", value=f["Tên đơn vị"])
-
     c1 = st.columns(3)
     with c1[0]: st.text_input("Kế hoạch", key="plan_txt", on_change=_on_change_plan)
     with c1[1]: st.text_input("Thực hiện", key="actual_txt", on_change=_on_change_actual)
@@ -619,18 +617,13 @@ with st.container():
         label_metric = "Điểm trừ (tự tính)" if (tmp_row["Điểm KPI"] is not None and tmp_row["Điểm KPI"]<0) else "Điểm KPI (tự tính)"
         st.metric(label_metric, tmp_row["Điểm KPI"] if tmp_row["Điểm KPI"] is not None else "—")
     with c2[2]:
-        f["Ghi chú"] = st.text_input("Ghi chú", value=f["Ghi chú"])
-
-    if "khoảng" in f["Phương pháp đo kết quả"].lower():
+        f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
+        f["Năm"] = st.text_input("Năm", value=str(f["Năm"]))
         c3 = st.columns(2)
         with c3[0]: f["Ngưỡng dưới"] = st.text_input("Ngưỡng dưới", value=str(f.get("Ngưỡng dưới") or ""))
         with c3[1]: f["Ngưỡng trên"] = st.text_input("Ngưỡng trên", value=str(f.get("Ngưỡng trên") or ""))
 
-    c4 = st.columns(2)
-    with c4[0]: f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
-    with c4[1]: f["Năm"]   = st.text_input("Năm",   value=str(f["Năm"]))
-
-    # Núi màu
+        # Núi màu
     b1,b2,b3,b4,b5 = st.columns([1,1,1,1,1.4])
     with b1:
         st.markdown('<div class="btn-save"></div>', unsafe_allow_html=True)
