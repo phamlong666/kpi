@@ -617,13 +617,10 @@ with st.container():
         label_metric = "Điểm trừ (tự tính)" if (tmp_row["Điểm KPI"] is not None and tmp_row["Điểm KPI"]<0) else "Điểm KPI (tự tính)"
         st.metric(label_metric, tmp_row["Điểm KPI"] if tmp_row["Điểm KPI"] is not None else "—")
     with c2[2]:
-        f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
-        f["Năm"] = st.text_input("Năm", value=str(f["Năm"]))
-        c3 = st.columns(2)
-        with c3[0]: f["Ngưỡng dưới"] = st.text_input("Ngưỡng dưới", value=str(f.get("Ngưỡng dưới") or ""))
-        with c3[1]: f["Ngưỡng trên"] = st.text_input("Ngưỡng trên", value=str(f.get("Ngưỡng trên") or ""))
-
-        # Núi màu
+        col_tn = st.columns(2)
+        with col_tn[0]: f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
+        with col_tn[1]: f["Năm"] = st.text_input("Năm", value=str(f["Năm"]))
+            # Núi màu
     b1,b2,b3,b4,b5 = st.columns([1,1,1,1,1.4])
     with b1:
         st.markdown('<div class="btn-save"></div>', unsafe_allow_html=True)
