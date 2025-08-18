@@ -510,7 +510,7 @@ logo64 = _img64_local(LOGO_PATH)
 
 st.markdown(f"""
 <style>
-.app-header {{ display:flex; align-items:center; gap:12px; margin:0 0 6px; }}
+.app-header {{ display:flex; align-items:center; gap:12px; margin:2px 0 10px; }}
 .app-logo {{ width:52px; height:52px; border-radius:50%; box-shadow:0 0 0 3px #fff, 0 0 0 6px #ff4b4b20; }}
 .app-title {{ margin:0; line-height:1.05; font-size:22px; font-weight:800; letter-spacing:.15px;
   background: linear-gradient(90deg,#0ea5e9 0%,#22c55e 50%,#a855f7 100%);
@@ -595,6 +595,8 @@ with st.container():
     with c0[0]: f["Tên chỉ tiêu (KPI)"] = st.text_input("Tên chỉ tiêu (KPI)", value=f["Tên chỉ tiêu (KPI)"])
     with c0[1]: f["Đơn vị tính"] = st.text_input("Đơn vị tính", value=f["Đơn vị tính"])
     with c0[2]: f["Bộ phận/người phụ trách"] = st.text_input("Bộ phận/người phụ trách", value=f["Bộ phận/người phụ trách"])
+    with c0[3]: f["Tên đơn vị"] = st.text_input("Tên đơn vị", value=f["Tên đơn vị"])
+
     c1 = st.columns(3)
     with c1[0]: st.text_input("Kế hoạch", key="plan_txt", on_change=_on_change_plan)
     with c1[1]: st.text_input("Thực hiện", key="actual_txt", on_change=_on_change_actual)
@@ -617,10 +619,18 @@ with st.container():
         label_metric = "Điểm trừ (tự tính)" if (tmp_row["Điểm KPI"] is not None and tmp_row["Điểm KPI"]<0) else "Điểm KPI (tự tính)"
         st.metric(label_metric, tmp_row["Điểm KPI"] if tmp_row["Điểm KPI"] is not None else "—")
     with c2[2]:
-        col_tn = st.columns(2)
-        with col_tn[0]: f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
-        with col_tn[1]: f["Năm"] = st.text_input("Năm", value=str(f["Năm"]))
-            # Núi màu
+        f["Ghi chú"] = st.text_input("Ghi chú", value=f["Ghi chú"])
+
+    if "khoảng" in f["Phương pháp đo kết quả"].lower():
+        c3 = st.columns(2)
+        with c3[0]: f["Ngưỡng dưới"] = st.text_input("Ngưỡng dưới", value=str(f.get("Ngưỡng dưới") or ""))
+        with c3[1]: f["Ngưỡng trên"] = st.text_input("Ngưỡng trên", value=str(f.get("Ngưỡng trên") or ""))
+
+    c4 = st.columns(2)
+    with c4[0]: f["Tháng"] = st.text_input("Tháng", value=str(f["Tháng"]))
+    with c4[1]: f["Năm"]   = st.text_input("Năm",   value=str(f["Năm"]))
+
+    # Núi màu
     b1,b2,b3,b4,b5 = st.columns([1,1,1,1,1.4])
     with b1:
         st.markdown('<div class="btn-save"></div>', unsafe_allow_html=True)
@@ -644,55 +654,8 @@ with st.container():
     st.markdown('</div>', unsafe_allow_html=True)  # đóng .kpi-sticky
 
 # ------------------- CSV khu vực dưới -------------------
-st.subheader("⬇️ Nhập CSV vào KPI")
-up = st.file_uploader("Tải file CSV", type=["csv"])
-
-if "_csv_cache" not in st.session_state:
-    st.session_state["_csv_cache"] = pd.DataFrame(columns=KPI_COLS)
-
-if up is not None:
-    up_bytes = up.getvalue()
-    sig = f"{getattr(up,'name','')}:{len(up_bytes)}"
-    if st.session_state.get("_csv_loaded_sig") != sig or st.session_state["_csv_cache"].empty:
-        try: tmp = pd.read_csv(io.BytesIO(up_bytes))
-        except Exception: tmp = pd.read_csv(io.BytesIO(up_bytes), encoding="utf-8-sig")
-        tmp = normalize_columns(tmp); tmp = coerce_numeric_cols(tmp)
-        if "Điểm KPI" not in tmp.columns:
-            tmp["Điểm KPI"] = tmp.apply(compute_score_with_method, axis=1)
-        st.session_state["_csv_cache"] = tmp
-        st.session_state["_csv_loaded_sig"] = sig
-
-base = st.session_state["_csv_cache"]
-df_show = base.copy()
-if "✓ Chọn" not in df_show.columns:
-    df_show.insert(0,"✓ Chọn",False)
-df_show["✓ Chọn"] = df_show["✓ Chọn"].astype("bool")
-sel = st.session_state.get("_selected_idx", None)
-if sel is not None and sel in df_show.index:
-    df_show.loc[sel,"✓ Chọn"] = True
-
-df_edit = st.data_editor(
-    df_show, use_container_width=True, hide_index=True, num_rows="dynamic",
-    column_config={"✓ Chọn": st.column_config.CheckboxColumn(label="✓ Chọn", default=False,
-                                                             help="Chọn 1 dòng để nạp lên biểu mẫu")},
-    key="csv_editor",
-)
-
-df_cache = df_edit.drop(columns=["✓ Chọn"], errors="ignore").copy()
-df_cache = coerce_numeric_cols(df_cache)
-st.session_state["_csv_cache"] = df_cache
-
-new_selected_idxs = df_edit.index[df_edit["✓ Chọn"]==True].tolist()
-new_sel = new_selected_idxs[0] if new_selected_idxs else None
-if new_sel != st.session_state.get("_selected_idx"):
-    st.session_state["_selected_idx"] = new_sel
-    if new_sel is not None:
-        st.session_state["_csv_form"].update({k: df_cache.loc[new_sel].get(k, "") for k in KPI_COLS})
-        st.session_state["plan_txt"]   = format_vn_number(parse_float(df_cache.loc[new_sel].get("Kế hoạch")  or 0), 2)
-        st.session_state["actual_txt"] = format_vn_number(parse_float(df_cache.loc[new_sel].get("Thực hiện") or 0), 2)
-    st.rerun()
-
-# --- Apply form vào cache (dùng chung cho các nút) ---
+# --- CSV block moved to bottom
+ (dùng chung cho các nút) ---
 def apply_form_to_cache():
     base = st.session_state["_csv_cache"].copy()
     base = coerce_numeric_cols(base)
@@ -757,3 +720,54 @@ if save_drive_clicked:
         save_report_to_drive(x_bytes,x_ext,x_mime,pdf_bytes if pdf_bytes else None)
     except Exception as e:
         st.error(f"Lỗi lưu Google Drive: {e}")
+
+# ------------------- CSV UPLOADER (moved to bottom) -------------------
+st.subheader("⬇️ Nhập CSV vào KPI")
+up = st.file_uploader("Tải file CSV", type=["csv"])
+
+if "_csv_cache" not in st.session_state:
+    st.session_state["_csv_cache"] = pd.DataFrame(columns=KPI_COLS)
+
+if up is not None:
+    up_bytes = up.getvalue()
+    sig = f"{getattr(up,'name','')}:{len(up_bytes)}"
+    if st.session_state.get("_csv_loaded_sig") != sig or st.session_state["_csv_cache"].empty:
+        try: tmp = pd.read_csv(io.BytesIO(up_bytes))
+        except Exception: tmp = pd.read_csv(io.BytesIO(up_bytes), encoding="utf-8-sig")
+        tmp = normalize_columns(tmp); tmp = coerce_numeric_cols(tmp)
+        if "Điểm KPI" not in tmp.columns:
+            tmp["Điểm KPI"] = tmp.apply(compute_score_with_method, axis=1)
+        st.session_state["_csv_cache"] = tmp
+        st.session_state["_csv_loaded_sig"] = sig
+
+base = st.session_state["_csv_cache"]
+df_show = base.copy()
+if "✓ Chọn" not in df_show.columns:
+    df_show.insert(0,"✓ Chọn",False)
+df_show["✓ Chọn"] = df_show["✓ Chọn"].astype("bool")
+sel = st.session_state.get("_selected_idx", None)
+if sel is not None and sel in df_show.index:
+    df_show.loc[sel,"✓ Chọn"] = True
+
+df_edit = st.data_editor(
+    df_show, use_container_width=True, hide_index=True, num_rows="dynamic",
+    column_config={"✓ Chọn": st.column_config.CheckboxColumn(label="✓ Chọn", default=False,
+                                                             help="Chọn 1 dòng để nạp lên biểu mẫu")},
+    key="csv_editor",
+)
+
+df_cache = df_edit.drop(columns=["✓ Chọn"], errors="ignore").copy()
+df_cache = coerce_numeric_cols(df_cache)
+st.session_state["_csv_cache"] = df_cache
+
+new_selected_idxs = df_edit.index[df_edit["✓ Chọn"]==True].tolist()
+new_sel = new_selected_idxs[0] if new_selected_idxs else None
+if new_sel != st.session_state.get("_selected_idx"):
+    st.session_state["_selected_idx"] = new_sel
+    if new_sel is not None:
+        st.session_state["_csv_form"].update({k: df_cache.loc[new_sel].get(k, "") for k in KPI_COLS})
+        st.session_state["plan_txt"]   = format_vn_number(parse_float(df_cache.loc[new_sel].get("Kế hoạch")  or 0), 2)
+        st.session_state["actual_txt"] = format_vn_number(parse_float(df_cache.loc[new_sel].get("Thực hiện") or 0), 2)
+    st.rerun()
+
+# --- Apply form vào cache
